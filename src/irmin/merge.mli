@@ -23,7 +23,7 @@ val ok : 'a -> ('a, conflict) result Lwt.t
 (** Return [Ok x]. *)
 
 val conflict : ('a, unit, string, ('b, conflict) result Lwt.t) format4 -> 'a
-(** Return [Error (Conflict str)]. *)
+(** Return [Error (`Conflict str)]. *)
 
 val bind :
   ('a, 'b) result Lwt.t ->
@@ -40,8 +40,8 @@ val map : ('a -> 'c) -> ('a, 'b) result Lwt.t -> ('c, 'b) result Lwt.t
 (** {1 Merge Combinators} *)
 
 type 'a promise = unit -> ('a option, conflict) result Lwt.t
-(** An ['a] promise is a function which, when called, will eventually return a
-    value type of ['a]. A promise is an optional, lazy and non-blocking value. *)
+(** An ['a promise] is a function which, when called, will eventually return a
+    value of type ['a]. A promise is an optional, lazy and non-blocking value. *)
 
 val promise : 'a -> 'a promise
 (** [promise a] is the promise containing [a]. *)
@@ -85,8 +85,7 @@ val with_conflict : (string -> string) -> 'a t -> 'a t
 (** [with_conflict f m] is [m] with the conflict error message modified by [f]. *)
 
 val like_lwt : 'a Type.t -> 'b t -> ('a -> 'b Lwt.t) -> ('b -> 'a Lwt.t) -> 'a t
-(** Same as {{!Merge.biject} biject} but with blocking domain converting
-    functions. *)
+(** Same as [like] but with non-blocking domain converting functions. *)
 
 (** {1 Basic Merges} *)
 
@@ -94,16 +93,16 @@ val default : 'a Type.t -> 'a t
 (** [default t] is the default merge function for values of type [t]. This is a
     simple merge function which supports changes in one branch at a time:
 
-    - if [t1=old] then the result of the merge is [OK t2];
-    - if [t2=old] then return [OK t1];
-    - otherwise the result is [Conflict]. *)
+    - if [t1=old] then the result of the merge is [Ok t2];
+    - if [t2=old] then return [Ok t1];
+    - otherwise the result is [Error (`Conflict str)]. *)
 
 val idempotent : 'a Type.t -> 'a t
 (** [idempotent t] is the default merge function for values of type [t] using
     idempotent operations. It follows the same rules as the {!default} merge
     function but also adds:
 
-    - if [t1=t2] then the result of the merge is [OK t1]. *)
+    - if [t1=t2] then the result of the merge is [Ok t1]. *)
 
 val unit : unit t
 (** [unit] is the default merge function for unit values. *)
@@ -174,7 +173,7 @@ end
 
     {b Note:} We only consider sets of bindings, instead of multisets.
     Application developers should take care of concurrent addition and removal
-    of similar bindings themselves, by using the appropriate {{!Merge.MSet}
+    of similar bindings themselves, by using the appropriate {{!Merge.MultiSet}
     multi-sets}. *)
 
 (** Lift merge functions to sets. *)

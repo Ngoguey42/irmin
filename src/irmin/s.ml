@@ -23,7 +23,7 @@ module type PATH = sig
   (** The type for path values. *)
 
   type step
-  (** Type type for path's steps. *)
+  (** Type for path's steps. *)
 
   val empty : t
   (** The empty path. *)
@@ -88,7 +88,7 @@ module type TYPED_HASH = sig
   type value
 
   val hash : value -> t
-  (** Compute a deterministic store key from a string. *)
+  (** Compute a deterministic store key from a value. *)
 
   val short_hash : t -> int
   (** [short_hash h] is a small hash of [h], to be used for instance as the
@@ -104,7 +104,7 @@ module type TYPED_HASH = sig
 end
 
 module type CONTENTS = sig
-  (** {1 Signature for store contents} *)
+  (** {1 Signature for Store Contents} *)
 
   type t [@@deriving irmin]
   (** The type for user-defined contents. *)
@@ -118,7 +118,7 @@ module type CONTENTS = sig
 end
 
 module type CONTENT_ADDRESSABLE_STORE = sig
-  (** {1 Content-addressable stores}
+  (** {1 Content-addressable Stores}
 
       Content-addressable stores are store where it is possible to read and add
       new values. Keys are derived from the values raw contents and hence are
@@ -168,9 +168,9 @@ module type CONTENT_ADDRESSABLE_STORE_MAKER = functor
 end
 
 module type APPEND_ONLY_STORE = sig
-  (** {1 Append-only stores}
+  (** {1 Append-only Stores}
 
-      Append-onlye stores are store where it is possible to read and add new
+      Append-only stores are store where it is possible to read and add new
       values. *)
 
   type 'a t
@@ -187,7 +187,7 @@ module type APPEND_ONLY_STORE = sig
   (** [mem t k] is true iff [k] is present in [t]. *)
 
   val find : [> `Read ] t -> key -> value option Lwt.t
-  (** [find t k] is [Some v] if [k] is associated to [v] in [t] and [None] is
+  (** [find t k] is [Some v] if [k] is associated to [v] in [t] and [None] if
       [k] is not present in [t]. *)
 
   val add : [> `Write ] t -> key -> value -> unit Lwt.t
@@ -238,7 +238,7 @@ module type CONTENTS_STORE = sig
 end
 
 module type NODE = sig
-  (** {1 Node values} *)
+  (** {1 Node Values} *)
 
   type t
   (** The type for node values. *)
@@ -282,7 +282,7 @@ module type NODE = sig
   (** [remove t s] is the node where [find t s] is [None] but is similar to [t]
       otherwise. *)
 
-  (** {1 Value types} *)
+  (** {1 Value Types} *)
 
   val t : t Type.t
   (** [t] is the value type for {!t}. *)
@@ -349,7 +349,7 @@ module type NODE_GRAPH = sig
 
   val closure :
     [> `Read ] t -> min:node list -> max:node list -> node list Lwt.t
-  (** [closure t min max] is the unordered list of nodes [n] reachable from a
+  (** [closure t ~min ~max] is the unordered list of nodes [n] reachable from a
       node of [max] along a path which: (i) either contains no [min] or (ii) it
       ends with a [min].
 
@@ -433,7 +433,7 @@ type config = Conf.t
 type 'a diff = 'a Diff.t
 
 module type COMMIT = sig
-  (** {1 Commit values} *)
+  (** {1 Commit Values} *)
 
   type t
   (** The type for commit values. *)
@@ -631,10 +631,10 @@ module type BRANCH = sig
 end
 
 module type ATOMIC_WRITE_STORE = sig
-  (** {1 Atomic write stores}
+  (** {1 Atomic Write Stores}
 
       Atomic-write stores are stores where it is possible to read, update and
-      remove elements, with atomically guarantees. *)
+      remove elements, with atomicity guarantees. *)
 
   type t
   (** The type for atomic-write backend stores. *)
@@ -683,7 +683,7 @@ module type ATOMIC_WRITE_STORE = sig
   (** [watch t ?init f] adds [f] to the list of [t]'s watch handlers and returns
       the watch handler to be used with {!unwatch}. [init] is the optional
       initial values. It is more efficient to use {!watch_key} to watch only a
-      single given key.*)
+      single given key. *)
 
   val watch_key :
     t -> key -> ?init:value -> (value diff -> unit Lwt.t) -> watch Lwt.t
@@ -723,7 +723,7 @@ end
 type remote = ..
 
 module type SYNC = sig
-  (** {1 Remote synchronization} *)
+  (** {1 Remote Synchronization} *)
 
   type t
   (** The type for store handles. *)

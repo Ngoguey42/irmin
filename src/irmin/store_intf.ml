@@ -17,7 +17,7 @@
 module Sigs = S
 
 module type S = sig
-  (** {1 Irmin stores}
+  (** {1 Irmin Stores}
 
       Irmin stores are tree-like read-write stores with extended capabilities.
       They allow an application (or a collection of applications) to work with
@@ -105,7 +105,7 @@ module type S = sig
       ?max:[ `Head | `Max of commit list ] ->
       t ->
       slice Lwt.t
-    (** [export t ~full ~depth ~min ~max] exports the store slice between [min]
+    (** [export t ?full ?depth ?min ?max] exports the store slice between [min]
         and [max], using at most [depth] history depth (starting from the max).
 
         If [max] is `Head (also the default value), use the current [heads]. If
@@ -299,10 +299,11 @@ module type S = sig
     (** [t] is the value type for {!t}. *)
 
     val pp_hash : t Fmt.t
-    (** [pp] is the pretty-printer for commit. Display only the hash. *)
+    (** [pp_hash] is the pretty-printer for commit. Display only the hash. *)
 
     val v : repo -> info:Info.t -> parents:hash list -> tree -> commit Lwt.t
-    (** [v r i ~parents:p t] is the commit [c] such that:
+    (** [v r ~info:i ~parents:p t] is the commit [c] from the repo [r] such
+        that:
 
         - [info c = i]
         - [parents c = p]
@@ -320,7 +321,7 @@ module type S = sig
     (** {1 Import/Export} *)
 
     val hash : commit -> hash
-    (** [hash c] it [c]'s hash. *)
+    (** [hash c] is [c]'s hash. *)
 
     val of_hash : repo -> hash -> commit option Lwt.t
     (** [of_hash r h] is the the commit object in [r] having [h] as hash, or
@@ -334,7 +335,7 @@ module type S = sig
     (** {1 Import/Export} *)
 
     val hash : contents -> hash
-    (** [hash c] it [c]'s hash in the repository [r]. *)
+    (** [hash c] is [c]'s hash. *)
 
     val of_hash : repo -> hash -> contents option Lwt.t
     (** [of_hash r h] is the the contents object in [r] having [h] as hash, or
@@ -356,7 +357,7 @@ module type S = sig
     (** {1 Import/Export} *)
 
     val hash : tree -> hash
-    (** [hash r c] it [c]'s hash in the repository [r]. *)
+    (** [hash t] is [t]'s hash. *)
 
     val of_hash : Repo.t -> hash -> tree option Lwt.t
     (** [of_hash r h] is the the tree object in [r] having [h] as hash, or
@@ -689,7 +690,7 @@ module type S = sig
   val unwatch : watch -> unit Lwt.t
   (** [unwatch w] disable [w]. Return once the [w] is fully disabled. *)
 
-  (** {1 Merges and Common Ancestors.} *)
+  (** {1 Merges and Common Ancestors} *)
 
   type 'a merge =
     info:Info.f ->
@@ -749,10 +750,9 @@ module type S = sig
       head is not set) and stopping at [min] if specified. *)
 
   val last_modified : ?depth:int -> ?n:int -> t -> key -> commit list Lwt.t
-  (** [last_modified ?number c k] is the list of the last [number] commits that
-      modified [key], in ascending order of date. [depth] is the maximum depth
-      to be explored in the commit graph, if any. Default value for [number] is
-      1. *)
+  (** [last_modified ?depth ?n c k] is the list of the last [n] commits that
+      modified [k], in ascending order of date. [depth] is the maximum depth to
+      be explored in the commit graph, if any. Default value for [n] is 1. *)
 
   (** Manipulate branches. *)
   module Branch : sig

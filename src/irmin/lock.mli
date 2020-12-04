@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-(** {1 Process locking helpers} *)
+(** {1 Process Locking Helpers} *)
 
 module type S = sig
   type t

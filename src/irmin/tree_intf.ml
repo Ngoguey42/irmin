@@ -127,7 +127,7 @@ module type S = sig
 
     val hash : t -> hash
     (** [hash t] is the hash of the underlying (non-lazy) form of [t] when
-        serialised in the underlying store.*)
+        serialised in the underlying store. *)
 
     val list : t -> (step * [ `Contents | `Node ]) list or_error Lwt.t
     (** [list t] is the list of keys in [t], and their corresponding kinds. *)
@@ -140,8 +140,8 @@ module type S = sig
 
     val clear : ?depth:int -> t -> unit
     (** [clear ?depth t] clears all the cache in the tree [t] for subtrees with
-        a depth higher than [depth]. If [depth] is not set, all the subtrees are
-        cleared. *)
+        a depth higher or equal to [depth]. If [depth] is not set, all the
+        subtrees are cleared. *)
   end
 
   val mem_tree : t -> key -> bool Lwt.t
@@ -153,11 +153,11 @@ module type S = sig
 
   val get_tree : t -> key -> t Lwt.t
   (** [get_tree t k] is [v] if [k] is associated to [v] in [t]. Raise
-      [Invalid_arg] if [k] is not present in [t].*)
+      [Invalid_arg] if [k] is not present in [t]. *)
 
   val add_tree : t -> key -> t -> t Lwt.t
   (** [add_tree t k v] is the tree where the key [k] is bound to the tree [v]
-      but is similar to [t] for other bindings *)
+      but is similar to [t] for other bindings. *)
 
   val merge : t Merge.t
   (** [merge] is the 3-way merge function for trees. *)
@@ -206,13 +206,14 @@ module type S = sig
     t ->
     'a ->
     'a Lwt.t
-  (** [fold f t acc] folds [f] over [t]'s leafs.
+  (** [fold ?force ?uniq ?pre ?post f t acc] folds [f] over [t]'s leafs and
+      folds [pre] and [post] over [t]'s nodes.
 
-      For every node [n], ui [n] is a leaf node, call [f path n]. Otherwise:
+      For every node [n], if [n] is a leaf node, call [f path n acc]. Otherwise:
 
-      - Call [pre path n]. By default [pre] is the identity;
+      - Call [pre path n acc]. By default [pre] is the identity;
       - Recursively call [fold] on each children, in lexicographic order;
-      - Call [post path n]; By default [post] is the identity.
+      - Call [post path n acc]; By default [post] is the identity.
 
       See {!force} for details about the [force] parameters. By default it is
       [`And_clear].
@@ -234,8 +235,11 @@ module type S = sig
   [@@deriving irmin]
   (** The type for tree stats. *)
 
+  val pp_stats : stats Fmt.t
+  (** [pp_stats] is the pretty printer for tree statistics. *)
+
   val stats : ?force:bool -> t -> stats Lwt.t
-  (** [stats ~force t] are [t]'s statistics. If [force] is true, this will force
+  (** [stats ?force t] are [t]'s statistics. If [force] is true, this will force
       the reading of lazy nodes. By default it is [false]. *)
 
   (** {1 Concrete Trees} *)
@@ -260,7 +264,7 @@ module type S = sig
       depth higher than [depth]. If [depth] is not set, all of the subtrees are
       cleared. *)
 
-  (** {1 Performance counters} *)
+  (** {1 Performance Counters} *)
 
   type counters = {
     mutable contents_hash : int;
@@ -282,6 +286,13 @@ module type S = sig
   val reset_counters : unit -> unit
 
   val inspect : t -> [ `Contents | `Node of [ `Map | `Hash | `Value ] ]
+  (** [inspect t] is similar to {!kind} but for the root of the tree and with
+      more details about the lazy state.
+
+      - [`Contents]: the tree is just one loaded leaf.
+      - [`Node `Map]: the root is a fully read node. It may contain nodes that have not been saved to disk yet.
+      - [`Node `Hash]: the root is an unread node.
+      - [`Node `Value]: the root is a partially read node. If may contain nodes that have not been saved to disk yet. *)
 end
 
 module type Tree = sig

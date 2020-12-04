@@ -30,7 +30,7 @@ module type S = sig
     Buffer.t ->
     unit Lwt.t
   (** [output_buffer t ?html ?depth ?full buf] outputs the Graphviz
-      representation of [t] in the buffer [buf].
+      representation of the store [t] in the buffer [buf].
 
       [html] (default is false) enables HTML labels.
 

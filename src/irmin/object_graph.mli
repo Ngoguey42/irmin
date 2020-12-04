@@ -41,11 +41,11 @@ module type S = sig
     max:vertex list ->
     unit ->
     t Lwt.t
-  (** [closure depth pred min max ()] creates the transitive closure graph of
-      [max] using the predecessor relation [pred]. The graph is bounded by the
-      [min] nodes and by [depth].
+  (** [closure ?depth ~pred ~min ~max ()] creates the transitive closure graph
+      of [max] using the predecessor relation [pred]. The graph is bounded by
+      the [min] nodes and by [depth].
 
-      {b Note:} Both [min] and [max] are subsets of [n]. *)
+      {b Note:} Both [min] and [max] are subsets of the output graph. *)
 
   val iter :
     ?cache_size:int ->
@@ -59,18 +59,26 @@ module type S = sig
     rev:bool ->
     unit ->
     unit Lwt.t
-  (** [iter depth min max node edge skip rev ()] iterates in topological order
-      over the closure graph starting with the [max] nodes and bounded by the
-      [min] nodes and by [depth].
+  (** [iter ?depth ~pred ~min ~max ~node ?edge ~skip ~rev ()] iterates over the
+      transitive closure of the directed acyclic graph rooted at the [max]
+      nodes, using the predecessor relation [pred] and bounded by the [min]
+      nodes, by [depth] and by calls to [skip].
 
-      It applies three functions while traversing the graph: [node] on the
-      nodes; [edge n predecessor_of_n] on the directed edges and [skip n] to not
-      include a node [n], its predecessors and the outgoing edges of [n].
+      It applies two functions on each node while traversing the graph: [node n]
+      on a node [n] and [edge n predecessor_of_n] on the all the directed edges
+      starting from [n]. [edge n p] is always applied after [node n].
 
-      If [rev] is true (the default) then the graph is traversed in the reverse
+      If [n] is in [min], [edge n predecessor_of_n] is not applied , but [node n]
+      and [edge successor_of_n n] are still applied.
+
+      If a node [n] is skipped or at maximum depth then neither [node n] nor
+      [edge n predecessor_of_n] are applied, but [edge successor_of_n n] still
+      is.
+
+      If [rev] is false then the graph is traversed in topological order. If
+      [rev] is true (the default) then the graph is traversed in the reverse
       order: [node n] is applied only after it was applied on all its
-      predecessors; [edge n p] is applied after [node n]. Note that [edge n p]
-      is applied even if [p] is skipped.
+      predecessors.
 
       [cache_size] is the size of the LRU cache used to store nodes already
       seen. If [None] (by default) every traversed nodes is stored (and thus no
@@ -82,15 +90,15 @@ module type S = sig
     (vertex * Graph.Graphviz.DotAttributes.edge list * vertex) list ->
     string ->
     unit
-  (** [output ppf vertex edges name] create aand dumps the graph contents on
-      [ppf]. The graph is defined by its [vertex] and [edges]. [name] is the
-      name of the output graph.*)
+  (** [output ppf vertices edges name] creates and dumps the graph contents on
+      [ppf]. The graph is defined by its [vertices] and [edges]. [name] is the
+      name of the output graph. *)
 
   val min : t -> vertex list
-  (** Compute the minimum vertex. *)
+  (** Compute the minimum vertices. *)
 
   val max : t -> vertex list
-  (** Compute the maximun vertex. *)
+  (** Compute the maximum vertices. *)
 
   type dump = vertex list * (vertex * vertex) list
   (** Expose the graph internals. *)

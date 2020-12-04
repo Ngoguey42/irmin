@@ -15,7 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-(** {1 Configuration converters}
+(** {1 Configuration Converters}
 
     A configuration converter transforms a string value to an OCaml value and
     vice-versa. There are a few {{!builtin_converters} built-in converters}. *)
@@ -48,7 +48,7 @@ val key :
   'a converter ->
   'a ->
   'a key
-(** [key ~docs ~docv ~doc name conv default] is a configuration key named [name]
+(** [key ?docs ?docv ?doc name conv default] is a configuration key named [name]
     that maps to value [default] by default. [conv] is used to convert key
     values provided by end users.
 
@@ -68,7 +68,7 @@ val name : 'a key -> string
 (** The key name. *)
 
 val conv : 'a key -> 'a converter
-(** [tc k] is [k]'s converter. *)
+(** [conv k] is [k]'s converter. *)
 
 val default : 'a key -> 'a
 (** [default k] is [k]'s default value. *)
@@ -119,7 +119,7 @@ val get : t -> 'a key -> 'a
 
     {b Raises.} [Not_found] if [k] is not bound in [d]. *)
 
-(** {1:builtin_converters Built-in value converters} *)
+(** {1:builtin_converters Built-in Value Converters} *)
 
 val bool : bool converter
 (** [bool] converts values with [bool_of_string]. *)

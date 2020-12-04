@@ -90,7 +90,7 @@ end
 module Path : sig
   (** {1 Path} *)
 
-  (** Signature for path implementations.*)
+  (** Signature for path implementations. *)
   module type S = sig
     include S.PATH
     (** @inline *)
@@ -280,7 +280,7 @@ module Private : sig
         (M : Metadata.S) :
       S with type hash = K.t and type step = P.step and type metadata = M.t
 
-    (** v1 serialisation *)
+    (** V1 serialisation *)
     module V1 (S : S with type step = string) : sig
       include
         S
@@ -379,7 +379,7 @@ module Private : sig
          and module Val = S.Val
 
     module type HISTORY = S.COMMIT_HISTORY
-    (** [History] specifies the signature for commit history. The history is
+    (** [HISTORY] specifies the signature for commit history. The history is
         represented as a partial-order of commits and basic functions to search
         through that history are provided.
 
@@ -865,7 +865,7 @@ end
 
 (** [ATOMIC_WRITE_STORE_MAKER] is the signature exposed by atomic-write store
     backends. [K] is the implementation of keys and [V] is the implementation of
-    values.*)
+    values. *)
 module type ATOMIC_WRITE_STORE_MAKER = functor (K : Type.S) (V : Type.S) -> sig
   include ATOMIC_WRITE_STORE with type key = K.t and type value = V.t
 
