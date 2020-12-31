@@ -322,7 +322,7 @@ module Private : sig
          and module Val = S.Val
 
     module type GRAPH = S.NODE_GRAPH
-    (** [Graph] specifies the signature for node graphs. A node graph is a
+    (** [GRAPH] specifies the signature for node graphs. A node graph is a
         deterministic DAG, labeled by steps. *)
 
     module Graph (S : STORE) :
