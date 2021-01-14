@@ -232,12 +232,15 @@ let test_representation_uniqueness_maxdepth_3 () =
         let tree' = Inode.Val.remove tree s in
         let repr' = Repr.to_string Inode.Val.t tree' in
         if not @@ String_set.mem repr' repr_per_tree then
-          Alcotest.failf "%s can be built with both [v] and [remove]" repr'
+          Alcotest.failf
+            "[remove] built %s, which is different from what [v] can build"
+            repr'
     | None ->
         let tree' = Inode.Val.add tree s c in
         let repr' = Repr.to_string Inode.Val.t tree' in
         if not @@ String_set.mem repr' repr_per_tree then
-          Alcotest.failf "%s can be built with both [v] and [add]" repr'
+          Alcotest.failf
+            "[add] built %s, which is different from what [v] can build" repr'
   in
   List.iter (fun t -> List.iter2 (fun s c -> f t s c) steps contents) trees;
   Lwt.return_unit
