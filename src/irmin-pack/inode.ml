@@ -565,8 +565,8 @@ struct
           let t = values (StepMap.remove s vs) in
           k t
       | Inodes t -> (
-          let length = t.length - 1 in
-          if length <= Conf.entries then
+          let len = t.length - 1 in
+          if len <= Conf.entries then
             let vs =
               list_inodes ~offset:0 ~length:t.length ~find (empty_acc t.length)
                 t
@@ -583,10 +583,15 @@ struct
             | Empty -> assert false
             | Inode t ->
                 let t = get_tree ~find t in
-                remove ~seed:(seed + 1) ~find t s @@ fun tree ->
-                entries.(i) <- inode ~tree (lazy (hash tree));
-                let t = inodes { seed; length; entries } in
-                k t)
+                if length t = 1 then (
+                  entries.(i) <- Empty;
+                  let t = inodes { seed; length = len; entries } in
+                  k t)
+                else
+                  remove ~seed:(seed + 1) ~find t s @@ fun tree ->
+                  entries.(i) <- inode ~tree (lazy (hash tree));
+                  let t = inodes { seed; length = len; entries } in
+                  k t)
 
     let remove ~find t s =
       (* XXX: [find_value ~seed:42] should break the unit tests. It doesn't. *)
@@ -777,6 +782,7 @@ struct
       let hash t = I.hash t.v
       let stable t = I.stable t.v
       let length t = I.length t.v
+      let index = I.index
     end
   end
 end

@@ -51,11 +51,63 @@ module H_contents =
       let t = Irmin.Type.string
     end)
 
+module String_set = Set.Make (struct
+  type t = string
+
+  let compare = compare
+end)
+
 let normal x = `Contents (x, Metadata.default)
 let foo = H_contents.hash "foo"
 let bar = H_contents.hash "bar"
 let check_hash = Alcotest.check_repr Inode.Val.hash_t
 let check_values = Alcotest.check_repr Inode.Val.t
+
+(** Use brute force to generate a [step] from a list of index that this [step]
+    should map to through the [Private.index] function. *)
+let gen_step : int list -> Path.step =
+  let tbl = Hashtbl.create 10 in
+  let max_brute_force_iterations = 100 in
+  fun indices ->
+    let step_of_small_int i =
+      Char.code 'a' + (i mod 26) |> Char.chr |> Char.escaped
+    in
+    let rec step_of_any_int i =
+      if i < 26 then step_of_small_int i
+      else step_of_small_int (i mod 26) ^ step_of_any_int (i / 26)
+    in
+    let rec aux i =
+      if i > max_brute_force_iterations then
+        failwith "Could not quickly generate a step"
+      else
+        let s = step_of_any_int i in
+        let is_valid =
+          indices
+          |> List.mapi (fun depth i -> (depth, i))
+          |> List.for_all (fun (depth, i) -> Private.index ~seed:depth s = i)
+        in
+        if is_valid then s else aux (i + 1)
+    in
+    match Hashtbl.find_opt tbl indices with
+    | Some s -> s
+    | None ->
+        let s = aux 0 in
+        Hashtbl.add tbl indices s;
+        s
+
+(** List all the steps that would fill a tree of depth [maxdepth_of_test]. *)
+let gen_steps maxdepth_of_test : Path.step list =
+  let ( ** ) a b = float_of_int a ** float_of_int b |> int_of_float in
+  List.init (Conf.entries ** maxdepth_of_test) (fun i ->
+      List.init maxdepth_of_test (fun j ->
+          let j = Conf.entries ** (maxdepth_of_test - j - 1) in
+          (* In the binary case (Conf.entries = 2), [j] is now the mask of the
+             bit to look at *)
+          i / j mod Conf.entries))
+  |> List.map gen_step
+
+let powerset xs =
+  List.fold_left (fun acc x -> acc @ List.map (fun ys -> x :: ys) acc) [ [] ] xs
 
 let check_node msg v t =
   let h = Private.hash v in
@@ -155,6 +207,41 @@ let test_remove_inodes () =
   Alcotest.(check bool) "v5 stable" (Private.stable v5) true;
   Context.close t
 
+(** [steps] is a list of length 8 containing the necessary steps to fill a tree
+    of depth=3.
+
+    [trees] is a list of length 2^8 containing the [Node.Val.t] formed from the
+    powerset of [steps] and constructed using [Node.Val.v]. [trees] contains the
+    empty tree and the full 8-leaves tree.
+
+    From all the 2^8 trees, assert that independantly, the 8 possible
+    [add]/[remove] operations yield a tree with its representation included in
+    [trees]. *)
+let test_representation_uniqueness_maxdepth_3 () =
+  let steps = gen_steps 3 in
+  let contents = List.map (fun s -> H_contents.hash s |> normal) steps in
+  let leaves_per_tree = powerset (List.combine steps contents) in
+  Alcotest.(check int) "Size of the powerset" (List.length leaves_per_tree) 256;
+  let trees = List.map Inode.Val.v leaves_per_tree in
+  let repr_per_tree =
+    trees |> List.map (Repr.to_string Inode.Val.t) |> String_set.of_list
+  in
+  let f tree s c =
+    match Inode.Val.find tree s with
+    | Some _ ->
+        let tree' = Inode.Val.remove tree s in
+        let repr' = Repr.to_string Inode.Val.t tree' in
+        if not @@ String_set.mem repr' repr_per_tree then
+          Alcotest.failf "%s can be built with both [v] and [remove]" repr'
+    | None ->
+        let tree' = Inode.Val.add tree s c in
+        let repr' = Repr.to_string Inode.Val.t tree' in
+        if not @@ String_set.mem repr' repr_per_tree then
+          Alcotest.failf "%s can be built with both [v] and [add]" repr'
+  in
+  List.iter (fun t -> List.iter2 (fun s c -> f t s c) steps contents) trees;
+  Lwt.return_unit
+
 let tests =
   [
     Alcotest.test_case "add values" `Quick (fun () ->
@@ -165,4 +252,6 @@ let tests =
         Lwt_main.run (test_remove_values ()));
     Alcotest.test_case "remove inodes" `Quick (fun () ->
         Lwt_main.run (test_remove_inodes ()));
+    Alcotest.test_case "test representation uniqueness" `Quick (fun () ->
+        Lwt_main.run (test_representation_uniqueness_maxdepth_3 ()));
   ]
