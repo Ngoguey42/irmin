@@ -51,11 +51,35 @@ module H_contents =
       let t = Irmin.Type.string
     end)
 
-module String_set = Set.Make (struct
-  type t = string
+module StepMap = struct
+  include Map.Make (struct
+    type t = Path.step
 
-  let compare = compare
+    let compare = Irmin.Type.(unstage (compare Path.step_t))
+  end)
+
+  let of_list l = List.fold_left (fun acc (k, v) -> add k v acc) empty l
+
+  let t a =
+    let open Irmin.Type in
+    map (list (pair Path.step_t a)) of_list bindings
+end
+
+module StepListMap = Map.Make (struct
+  type t = Path.step list
+
+  let compare = Irmin.Type.(unstage (compare (list Path.step_t)))
 end)
+
+(* module String_set = Set.Make (struct
+ *   type t = string
+ *
+ *   let compare = compare
+ * end)
+ *
+ * module Step_list = struct
+ *   type t = Path.step list [@@deriving irmin]
+ * end *)
 
 let normal x = `Contents (x, Metadata.default)
 let foo = H_contents.hash "foo"
@@ -219,16 +243,34 @@ let test_remove_inodes () =
     [trees]. *)
 let test_representation_uniqueness_maxdepth_3 () =
   let steps = gen_steps 3 in
-  let contents = List.map (fun s -> H_contents.hash s |> normal) steps in
-  let leaves_per_tree = powerset (List.combine steps contents) in
-  Alcotest.(check int) "Size of the powerset" (List.length leaves_per_tree) 256;
-  let trees = List.map Inode.Val.v leaves_per_tree in
-  let repr_per_tree =
-    trees |> List.map (Repr.to_string Inode.Val.t) |> String_set.of_list
+  let content_per_step =
+    List.map (fun s -> (s, H_contents.hash s |> normal)) steps
+    |> StepMap.of_list
   in
-  let f tree s c =
+  let steps_per_tree = powerset steps in
+  Alcotest.(check int) "Size of the powerset" (List.length steps_per_tree) 256;
+  let trees =
+    List.map
+      (fun steps ->
+        List.combine steps
+          (List.map (fun s -> StepMap.find s content_per_step) steps)
+        |> Inode.Val.v)
+      steps_per_tree
+  in
+  let tree_per_steps =
+    List.combine steps_per_tree trees
+    (* |> List.map (fun (steps, tree) -> *)
+    (* (steps, tree)) *)
+    |> List.to_seq
+    |> StepListMap.of_seq
+  in
+  let f steps tree s =
+    ()
+    (* let leaves' = List.filter () *)
+
     match Inode.Val.find tree s with
     | Some _ ->
+        let steps' = List.remove s steps in
         let tree' = Inode.Val.remove tree s in
         let repr' = Repr.to_string Inode.Val.t tree' in
         if not @@ String_set.mem repr' repr_per_tree then
@@ -242,7 +284,10 @@ let test_representation_uniqueness_maxdepth_3 () =
           Alcotest.failf
             "[add] built %s, which is different from what [v] can build" repr'
   in
-  List.iter (fun t -> List.iter2 (fun s c -> f t s c) steps contents) trees;
+
+  List.iter2
+    (fun ss t -> List.iter (fun s -> f ss t s) steps)
+    steps_per_tree trees;
   Lwt.return_unit
 
 let tests =
