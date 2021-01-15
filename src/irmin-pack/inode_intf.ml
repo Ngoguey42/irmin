@@ -64,20 +64,20 @@ module type INTER = sig
     int ->
     int * Elt.t
 
-  module Val_impl : sig
-    type t
-
-    val pred : t -> [ `Node of hash | `Inode of hash | `Contents of hash ] list
-    val of_bin : Elt.t -> t
-    val save : add:(hash -> Elt.t -> unit) -> mem:(hash -> bool) -> t -> unit
-    val hash : t -> hash
-  end
-
   module Val : sig
     type nonrec hash = hash
-    type t = { find : hash -> Val_impl.t option; v : Val_impl.t }
+    type t
 
     include Val_intf with type hash := hash and type t := t
+
+    val of_bin : (hash -> Elt.t option) -> Elt.t -> t
+
+    val save : add:(hash -> Elt.t -> unit) -> mem:(hash -> bool) -> t -> unit
+
+    val hash : t -> hash
+
+    (* XXX: Let's remove [Val_intf.Private] and include the extra signatures
+       here. *)
   end
 end
 

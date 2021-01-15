@@ -48,19 +48,17 @@ struct
   let unsafe_find ~check_integrity t k =
     match P.unsafe_find ~check_integrity t k with
     | None -> None
-    | Some v ->
-        let v = Inter.Val_impl.of_bin v in
-        Some v
+    | Some v -> Some v
 
   let find t k =
     P.find t k >|= function
     | None -> None
     | Some v ->
-        let v = Inter.Val_impl.of_bin v in
-        let find = unsafe_find ~check_integrity:true t in
-        Some { Val.find; v }
+       let find = unsafe_find ~check_integrity:true t in
+       let v = Inter.Val.of_bin find v in
+       Some v
 
-  let hash v = Inter.Val_impl.hash v.Val.v
+  let hash v = Inter.Val.hash v
   let equal_hash = Irmin.Type.(unstage (equal H.t))
 
   let check_hash expected got =
@@ -78,16 +76,18 @@ struct
   let clear_caches = P.clear_caches
 
   let save t v =
-    let add k v = P.unsafe_append ~ensure_unique:true ~overcommit:false t k v in
-    Inter.Val_impl.save ~add ~mem:(P.unsafe_mem t) v
+    let add k v =
+      P.unsafe_append ~ensure_unique:true ~overcommit:false t k v
+    in
+    Inter.Val.save ~add ~mem:(P.unsafe_mem t) v
 
   let add t v =
-    save t v.Val.v;
+    save t v;
     Lwt.return (hash v)
 
   let unsafe_add t k v =
     check_hash k (hash v);
-    save t v.Val.v;
+    save t v;
     Lwt.return ()
 
   let clear_caches_next_upper = P.clear_caches_next_upper
