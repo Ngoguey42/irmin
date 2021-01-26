@@ -21,7 +21,52 @@ type op =
 [@@deriving yojson]
 
 module Parse_trace = struct
-  let read_commits commits ncommits =
+  let is_hex_char = function
+    | '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' -> true
+    | _ -> false
+
+  let is_2char_hex s =
+    if String.length s <> 2 then false
+    else s |> String.to_seq |> List.of_seq |> List.for_all is_hex_char
+
+  let is_30char_hex s =
+    if String.length s <> 30 then false
+    else s |> String.to_seq |> List.of_seq |> List.for_all is_hex_char
+
+  let rec collapse_key_suffix = function
+    | a :: b :: c :: d :: e :: f :: tl
+      when is_2char_hex a
+           && is_2char_hex b
+           && is_2char_hex c
+           && is_2char_hex d
+           && is_2char_hex e
+           && is_30char_hex f ->
+        (a ^ b ^ c ^ d ^ e ^ f) :: collapse_key_suffix tl
+    | hd :: tl -> hd :: collapse_key_suffix tl
+    | [] -> []
+
+  (** This function collapses all the 6 step-long chunks forming 38 byte-long
+      hashes to a single step.
+
+      The paths in tezos:
+      https://www.dailambda.jp/blog/2020-05-11-plebeia/#tezos-path *)
+  let collapse_key = collapse_key_suffix
+
+  let collapse_op = function
+    | Add (key, v) -> Add (collapse_key key, v)
+    | Remove keys -> Remove (collapse_key keys)
+    | Find (keys, b) -> Find (collapse_key keys, b)
+    | Mem (keys, b) -> Mem (collapse_key keys, b)
+    | Mem_tree (keys, b) -> Mem_tree (collapse_key keys, b)
+    | Checkout _ as op -> op
+    | Copy (from, to_) -> Copy (collapse_key from, collapse_key to_)
+    | Commit _ as op -> op
+
+  let read_commits commits ncommits collapse =
+    let parse_op op =
+      if collapse then op_of_yojson op |> Result.map collapse_op
+      else op_of_yojson op
+    in
     let json = Dataset.get_stream () in
     let rec aux index_op index_commit operations =
       if index_commit >= ncommits then index_commit
@@ -33,7 +78,7 @@ module Parse_trace = struct
               index_commit;
             index_commit
         | op -> (
-            match op_of_yojson op with
+            match parse_op op with
             | Ok (Commit _ as x) ->
                 commits.(index_commit) <- List.rev (x :: operations);
                 (aux [@tailcall]) (index_op + 1) (index_commit + 1) []
@@ -43,9 +88,9 @@ module Parse_trace = struct
     in
     aux 0 0 []
 
-  let populate_array ncommits =
+  let populate_array ncommits collapse =
     let commits = Array.init ncommits (fun _ -> []) in
-    let n = read_commits commits ncommits in
+    let n = read_commits commits ncommits collapse in
     (commits, n)
 end
 
@@ -54,19 +99,44 @@ module Generate_trees_from_trace
 struct
   type t = { mutable tree : Store.tree }
 
-  type stats = {
-    mutable adds : int;
-    mutable removes : int;
-    mutable finds : int;
-    mutable mems : int;
-    mutable mem_tree : int;
-    mutable copies : int;
-  }
+  type stat_entry =
+    [ `Add | `Remove | `Find | `Mem | `Mem_tree | `Checkout | `Copy | `Commit ]
+  [@@deriving repr]
+
+  let op_tags =
+    [ `Add; `Remove; `Find; `Mem; `Mem_tree; `Checkout; `Copy; `Commit ]
 
   let stats =
-    { adds = 0; removes = 0; finds = 0; mems = 0; mem_tree = 0; copies = 0 }
+    op_tags
+    |> List.map (fun which -> (which, (0, Mtime.Span.zero)))
+    |> List.to_seq
+    |> Hashtbl.of_seq
 
-  let get_stats () = stats
+  let pp_stats fmt () =
+    let total =
+      Hashtbl.to_seq stats
+      |> Seq.map snd
+      |> Seq.map snd
+      |> Seq.fold_left Mtime.Span.add Mtime.Span.zero
+      |> Mtime.Span.to_s
+    in
+    let total = if total = 0. then 1. else total in
+    let pp_stat fmt which =
+      let n, el = Hashtbl.find stats which in
+      let el = Mtime.Span.to_s el in
+      Format.fprintf fmt "%d %a %.3f sec (%.1f%%)" n (Repr.pp stat_entry_t)
+        which el
+        (el /. total *. 100.)
+    in
+    Fmt.pf fmt "%a" Fmt.(list ~sep:(any "@\n") pp_stat) op_tags
+
+  let with_monitoring which f =
+    let n0, el0 = Hashtbl.find stats which in
+    let t0 = Mtime_clock.counter () in
+    let+ res = f () in
+    let el1 = Mtime_clock.count t0 in
+    Hashtbl.replace stats which (n0 + 1, Mtime.Span.add el0 el1);
+    res
 
   let error_find op k b n_op n_c =
     Fmt.failwith
@@ -75,61 +145,79 @@ struct
       Fmt.(list ~sep:comma string)
       k b
 
+  let exec_add t _repo prev_commit _n i key v () =
+    let+ tree = Store.Tree.add t.tree key v in
+    t.tree <- tree;
+    (i + 1, prev_commit)
+
+  let exec_remove t _repo prev_commit _n i keys () =
+    let+ tree = Store.Tree.remove t.tree keys in
+    t.tree <- tree;
+    (i + 1, prev_commit)
+
+  let exec_find t _repo prev_commit n i keys b () =
+    Store.Tree.find t.tree keys >|= function
+    | None when not b -> (i + 1, prev_commit)
+    | Some _ when b -> (i + 1, prev_commit)
+    | _ -> error_find "find" keys b i n
+
+  let exec_mem t _repo prev_commit n i keys b () =
+    let+ b' = Store.Tree.mem t.tree keys in
+    if b <> b' then error_find "mem" keys b i n;
+    (i + 1, prev_commit)
+
+  let exec_mem_tree t _repo prev_commit n i keys b () =
+    let+ b' = Store.Tree.mem_tree t.tree keys in
+    if b <> b' then error_find "mem_tree" keys b i n;
+    (i + 1, prev_commit)
+
+  let exec_checkout t repo prev_commit _n i () =
+    Option.get prev_commit |> Store.Commit.of_hash repo >|= function
+    | None -> Fmt.failwith "prev commit not found"
+    | Some commit ->
+        let tree = Store.Commit.tree commit in
+        t.tree <- tree;
+        (i + 1, prev_commit)
+
+  let exec_copy t _repo prev_commit _n i from to_ () =
+    Store.Tree.find_tree t.tree from >>= function
+    | None -> Lwt.return (i + 1, prev_commit)
+    | Some sub_tree ->
+        let+ tree = Store.Tree.add_tree t.tree to_ sub_tree in
+        t.tree <- tree;
+        (i + 1, prev_commit)
+
+  let exec_commit t repo prev_commit _n i date message () =
+    (* in tezos commits call Tree.list first for the unshallow operation *)
+    let* _ = Store.Tree.list t.tree [] in
+    let info = Irmin.Info.v ~date ~author:"Tezos" message in
+    let parents = match prev_commit with None -> [] | Some p -> [ p ] in
+    let+ commit = Store.Commit.v repo ~info ~parents t.tree in
+    Store.Tree.clear t.tree;
+    (i + 1, Some (Store.Commit.hash commit))
+
   let add_operations t repo prev_commit operations n =
     Lwt_list.fold_left_s
       (fun (i, prev_commit) (operation : op) ->
         match operation with
         | Add (key, v) ->
-            stats.adds <- succ stats.adds;
-            let+ tree = Store.Tree.add t.tree key v in
-            t.tree <- tree;
-            (i + 1, prev_commit)
+            exec_add t repo prev_commit n i key v |> with_monitoring `Add
         | Remove keys ->
-            stats.removes <- succ stats.removes;
-            let+ tree = Store.Tree.remove t.tree keys in
-            t.tree <- tree;
-            (i + 1, prev_commit)
-        | Find (keys, b) -> (
-            stats.finds <- succ stats.finds;
-            Store.Tree.find t.tree keys >|= function
-            | None when not b -> (i + 1, prev_commit)
-            | Some _ when b -> (i + 1, prev_commit)
-            | _ -> error_find "find" keys b i n)
+            exec_remove t repo prev_commit n i keys |> with_monitoring `Remove
+        | Find (keys, b) ->
+            exec_find t repo prev_commit n i keys b |> with_monitoring `Find
         | Mem (keys, b) ->
-            stats.mems <- succ stats.mems;
-            let+ b' = Store.Tree.mem t.tree keys in
-            if b <> b' then error_find "mem" keys b i n;
-            (i + 1, prev_commit)
+            exec_mem t repo prev_commit n i keys b |> with_monitoring `Mem
         | Mem_tree (keys, b) ->
-            stats.mem_tree <- succ stats.mem_tree;
-            let+ b' = Store.Tree.mem_tree t.tree keys in
-            if b <> b' then error_find "mem_tree" keys b i n;
-            (i + 1, prev_commit)
-        | Checkout _ -> (
-            Option.get prev_commit |> Store.Commit.of_hash repo >|= function
-            | None -> Fmt.failwith "prev commit not found"
-            | Some commit ->
-                let tree = Store.Commit.tree commit in
-                t.tree <- tree;
-                (i + 1, prev_commit))
-        | Copy (from, to_) -> (
-            stats.copies <- succ stats.copies;
-            Store.Tree.find_tree t.tree from >>= function
-            | None -> Lwt.return (i + 1, prev_commit)
-            | Some sub_tree ->
-                let+ tree = Store.Tree.add_tree t.tree to_ sub_tree in
-                t.tree <- tree;
-                (i + 1, prev_commit))
+            exec_mem_tree t repo prev_commit n i keys b
+            |> with_monitoring `Mem_tree
+        | Checkout _ ->
+            exec_checkout t repo prev_commit n i |> with_monitoring `Checkout
+        | Copy (from, to_) ->
+            exec_copy t repo prev_commit n i from to_ |> with_monitoring `Copy
         | Commit (_, date, message, _) ->
-            (* in tezos commits call Tree.list first for the unshallow operation *)
-            let* _ = Store.Tree.list t.tree [] in
-            let info = Irmin.Info.v ~date ~author:"Tezos" message in
-            let parents =
-              match prev_commit with None -> [] | Some p -> [ p ]
-            in
-            let+ commit = Store.Commit.v repo ~info ~parents t.tree in
-            Store.Tree.clear t.tree;
-            (i + 1, Some (Store.Commit.hash commit)))
+            exec_commit t repo prev_commit n i date message
+            |> with_monitoring `Commit)
       (0, prev_commit) operations
 
   let add_commits repo commits () =
@@ -153,7 +241,16 @@ type config = {
   nlarge_trees : int;
   operations_file : string;
   root : string;
-  quick : bool;
+  suite_filter :
+    [ `Slow
+    | `Quick
+    | `Quick_trace
+    | `Quick_large
+    | `Quick_chains
+    | `Slow_trace
+    | `Slow_large
+    | `Slow_chains ];
+  collapse : bool;
 }
 
 module Benchmark = struct
@@ -227,7 +324,7 @@ struct
   let run_read_trace ?quick config =
     reset_stats ();
     let ncommits = if quick = Some () then 10000 else config.ncommits_trace in
-    let commits, n = Parse_trace.populate_array ncommits in
+    let commits, n = Parse_trace.populate_array ncommits config.collapse in
     let config = { config with ncommits_trace = n } in
     let conf = Irmin_pack.config ~readonly:false ~fresh:true config.root in
     let* repo = Store.Repo.v conf in
@@ -301,12 +398,9 @@ let pp_inode_config fmt = function
 let pp_config b config fmt () =
   match b.mode with
   | `Read_trace ->
-      let stats = Bench_inodes_32.Trees_trace.get_stats () in
-      Format.fprintf fmt
-        "Tezos_log mode on inode config %a: %d commits (%d adds; %d removes; \
-         %d finds; %d mems; %d mem_tree; %d copies)"
-        pp_inode_config b.inode_config config.ncommits_trace stats.adds
-        stats.removes stats.finds stats.mems stats.mem_tree stats.copies
+      Format.fprintf fmt "Tezos_log mode on inode config %a: %d commits @\n%a"
+        pp_inode_config b.inode_config config.ncommits_trace
+        Bench_inodes_32.Trees_trace.pp_stats ()
   | `Chains ->
       Format.fprintf fmt
         "Chain trees mode on inode config %a: %d commits, each consisting of \
@@ -320,15 +414,16 @@ let pp_config b config fmt () =
         pp_inode_config b.inode_config config.ncommits config.nlarge_trees
         config.width
 
-let main ncommits ncommits_trace operations_file quick depth width nchain_trees
-    nlarge_trees =
+let main ncommits ncommits_trace operations_file suite_filter collapse depth
+    width nchain_trees nlarge_trees =
   let config =
     {
       ncommits;
       ncommits_trace;
       operations_file;
       root = "test-bench";
-      quick;
+      suite_filter;
+      collapse;
       depth;
       width;
       nchain_trees;
@@ -339,12 +434,25 @@ let main ncommits ncommits_trace operations_file quick depth width nchain_trees
   Random.self_init ();
   FSHelper.rm_dir config.root;
   let suite =
-    (* The suite contains two `Read_trace benchmarks. To prevent running both of
-       them when `Quick is not set, we remove the first one (which is the head
-       of the suite as well). *)
-    if config.quick then List.filter (fun b -> b.speed = `Quick) suite
-    else List.tl suite
+    List.filter
+      (fun { mode; speed; _ } ->
+        match (suite_filter, speed, mode) with
+        | `Slow, `Quick, `Read_trace ->
+            (* The suite contains two `Read_trace benchmarks, let's keep the
+               `Slow one only *)
+            false
+        | `Slow, _, _ -> true
+        | `Quick, `Quick, _ -> true
+        | `Quick_trace, `Quick, `Read_trace -> true
+        | `Quick_chains, `Quick, `Chains -> true
+        | `Quick_large, `Quick, `Large -> true
+        | `Slow_trace, `Slow, `Read_trace -> true
+        | `Slow_chains, `Slow, `Chains -> true
+        | `Slow_large, `Slow, `Large -> true
+        | _, _, _ -> false)
+      suite
   in
+
   let run_benchmarks () =
     Lwt_list.fold_left_s
       (fun (config, results) (b : suite_elt) ->
@@ -361,8 +469,26 @@ let main ncommits ncommits_trace operations_file quick depth width nchain_trees
 
 open Cmdliner
 
-let quick =
-  let doc = Arg.info ~doc:"Run the quick benchmarks" [ "quick" ] in
+let suite =
+  let suite =
+    [
+      ("slow", `Slow);
+      ("quick", `Quick);
+      ("quick_trace", `Quick_trace);
+      ("quick_chains", `Quick_chains);
+      ("quick_large", `Quick_large);
+      ("slow_trace", `Slow_trace);
+      ("slow_chains", `Slow_chains);
+      ("slow_large", `Slow_large);
+    ]
+  in
+  let doc = Arg.info ~doc:(Arg.doc_alts_enum suite) [ "suite" ] in
+  Arg.(value @@ opt (Arg.enum suite) `Slow doc)
+
+let collapse =
+  let doc =
+    Arg.info ~doc:"Collapse the paths in the trace benchmarks" [ "collapse" ]
+  in
   Arg.(value @@ flag doc)
 
 let ncommits =
@@ -417,7 +543,8 @@ let main_term =
     $ ncommits
     $ ncommits_trace
     $ operations_file
-    $ quick
+    $ suite
+    $ collapse
     $ depth
     $ width
     $ nchain_trees
