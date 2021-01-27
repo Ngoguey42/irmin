@@ -69,10 +69,6 @@ struct
     end)
 
     let of_list l = List.fold_left (fun acc (k, v) -> add k v acc) empty l
-
-    let t a =
-      let open Irmin.Type in
-      map (list (pair T.step_t a)) of_list bindings
   end
 
   (* Binary representation, useful to compute hashes *)
@@ -262,24 +258,78 @@ struct
   module Val_impl = struct
     open T
 
-    let equal_hash = Irmin.Type.(unstage (equal hash_t))
     let equal_value = Irmin.Type.(unstage (equal value_t))
 
-    type ptr = { target_hash : hash Lazy.t; mutable target : t option }
+    type 'a layout =
+      | Partial : (hash -> lazy_ptr t option) -> lazy_ptr layout
+      | Total : direct_ptr layout
+      | Flaky : lazy_ptr layout
 
-    and tree = { depth : int; length : int; entries : ptr option array }
+    and lazy_ptr = {
+      target_hash : hash Lazy.t;
+      mutable target : lazy_ptr t option;
+    }
 
-    and v = Values of value StepMap.t | Tree of tree
+    and direct_ptr = Ptr of direct_ptr t [@@unboxed]
 
-    and t = { hash : hash Lazy.t; stable : bool; v : v }
+    and 'ptr tree = { depth : int; length : int; entries : 'ptr option array }
 
-    let pred t =
+    and 'ptr v = Values of value StepMap.t | Tree of 'ptr tree
+
+    and 'ptr t = { hash : hash Lazy.t; stable : bool; v : 'ptr v }
+
+    module Ptr = struct
+      let hash : type ptr. ptr layout -> ptr -> _ = function
+        | Total -> fun (Ptr ptr) -> Lazy.force ptr.hash
+        | Partial _ -> fun { target_hash; _ } -> Lazy.force target_hash
+        | Flaky -> fun { target_hash; _ } -> Lazy.force target_hash
+
+      let target : type ptr. ptr layout -> ptr -> ptr t =
+       fun la ->
+        match la with
+        | Total -> fun (Ptr t) -> t
+        | Partial find -> (
+            function
+            | { target = Some entry; _ } -> entry
+            | t -> (
+                let h = hash la t in
+                match find h with
+                | None -> Fmt.failwith "%a: unknown key" pp_hash h
+                | Some x ->
+                    t.target <- Some x;
+                    x))
+        | Flaky -> (
+            function
+            | { target = Some entry; _ } -> entry
+            | _ ->
+                failwith
+                  "Impossible to load the subtree on an inode unserialized \
+                   using Repr")
+
+      let of_target : type ptr. ptr layout -> ptr t -> ptr = function
+        | Total -> fun target -> Ptr target
+        | Partial _ ->
+            fun target -> { target = Some target; target_hash = target.hash }
+        | Flaky ->
+            fun target -> { target = Some target; target_hash = target.hash }
+
+      let iter : type ptr. ptr layout -> (ptr t -> unit) -> ptr -> unit =
+        function
+        | Total -> fun f (Ptr entry) -> f entry
+        | Partial _ -> (
+            fun f -> function { target = Some entry; _ } -> f entry | _ -> ())
+        | Flaky -> (
+            fun f -> function { target = Some entry; _ } -> f entry | _ -> ())
+    end
+
+    let pred la t =
       match t.v with
       | Tree i ->
+          let hash_of_ptr = Ptr.hash la in
           Array.fold_left
             (fun acc -> function
               | None -> acc
-              | Some i -> `Inode (Lazy.force i.target_hash) :: acc)
+              | Some ptr -> `Inode (hash_of_ptr ptr) :: acc)
             [] i.entries
       | Values l ->
           StepMap.fold
@@ -292,45 +342,10 @@ struct
               v :: acc)
             l []
 
-    let hash_of_ptr (i : ptr) = Lazy.force i.target_hash
-
-    let ptr_t t : ptr Irmin.Type.t =
-      let same_hash =
-        Irmin.Type.stage @@ fun x y ->
-        equal_hash (hash_of_ptr x) (hash_of_ptr y)
-      in
-      let open Irmin.Type in
-      record "Inode.ptr" (fun hash target ->
-          { target_hash = lazy hash; target })
-      |+ field "hash" hash_t (fun t -> Lazy.force t.target_hash)
-      |+ field "target" (option t) (fun t -> t.target)
-      |> sealr
-      |> like ~equal:same_hash
-
-    let tree_t entry : tree Irmin.Type.t =
-      let open Irmin.Type in
-      record "Inode.tree" (fun depth length entries ->
-          { depth; length; entries })
-      |+ field "depth" int (fun t -> t.depth)
-      |+ field "length" int (fun t -> t.length)
-      |+ field "entries" (array entry) (fun t -> t.entries)
-      |> sealr
-
     let length t =
       match t.v with Values vs -> StepMap.cardinal vs | Tree vs -> vs.length
 
     let stable t = t.stable
-
-    let get_target ~find t =
-      match t.target with
-      | Some t -> t
-      | None -> (
-          let h = hash_of_ptr t in
-          match find h with
-          | None -> Fmt.failwith "%a: unknown key" pp_hash h
-          | Some x ->
-              t.target <- Some x;
-              x)
 
     type acc = {
       cursor : int;
@@ -340,17 +355,17 @@ struct
 
     let empty_acc n = { cursor = 0; values = []; remaining = n }
 
-    let rec list_entry ~offset ~length ~find acc = function
+    let rec list_entry la ~offset ~length acc = function
       | None -> acc
-      | Some i -> list_values ~offset ~length ~find acc (get_target ~find i)
+      | Some i -> list_values la ~offset ~length acc (Ptr.target la i)
 
-    and list_tree ~offset ~length ~find acc t =
+    and list_tree la ~offset ~length acc t =
       if acc.remaining <= 0 || offset + length <= acc.cursor then acc
       else if acc.cursor + t.length < offset then
         { acc with cursor = t.length + acc.cursor }
-      else Array.fold_left (list_entry ~offset ~length ~find) acc t.entries
+      else Array.fold_left (list_entry la ~offset ~length) acc t.entries
 
-    and list_values ~offset ~length ~find acc t =
+    and list_values la ~offset ~length acc t =
       if acc.remaining <= 0 || offset + length <= acc.cursor then acc
       else
         match t.v with
@@ -371,9 +386,9 @@ struct
                 cursor = acc.cursor + len;
                 remaining = acc.remaining - n;
               }
-        | Tree t -> list_tree ~offset ~length ~find acc t
+        | Tree t -> list_tree la ~offset ~length acc t
 
-    let list ?(offset = 0) ?length ~find t =
+    let list la ?(offset = 0) ?length t =
       let length =
         match length with
         | Some n -> n
@@ -382,14 +397,15 @@ struct
             | Values vs -> StepMap.cardinal vs - offset
             | Tree i -> i.length - offset)
       in
-      let entries = list_values ~offset ~length ~find (empty_acc length) t in
+      let entries = list_values la ~offset ~length (empty_acc length) t in
       List.concat (List.rev entries.values)
 
-    let to_bin_v = function
+    let to_bin_v la = function
       | Values vs ->
           let vs = StepMap.bindings vs in
           Bin.Values vs
       | Tree t ->
+          let hash_of_ptr = Ptr.hash la in
           let _, entries =
             Array.fold_left
               (fun (i, acc) -> function
@@ -402,13 +418,13 @@ struct
           let entries = List.rev entries in
           Bin.Tree { depth = t.depth; length = t.length; entries }
 
-    let to_bin t =
-      let v = to_bin_v t.v in
+    let to_bin la t =
+      let v = to_bin_v la t.v in
       Bin.v ~stable:t.stable ~hash:t.hash v
 
     let hash t = Lazy.force t.hash
 
-    let stabilize ~find t =
+    let stabilize la t =
       if t.stable then t
       else
         let n = length t in
@@ -416,14 +432,13 @@ struct
         else
           let hash =
             lazy
-              (let vs = list ~find t in
+              (let vs = list la t in
                Node.hash (Node.v vs))
           in
           { hash; stable = true; v = t.v }
 
     let hash_key = Irmin.Type.(unstage (short_hash step_t))
     let index ~depth k = abs (hash_key ~seed:depth k) mod Conf.entries
-    let entry ?target target_hash = Some { target; target_hash }
 
     let of_bin t =
       let v =
@@ -434,62 +449,40 @@ struct
         | Tree t ->
             let entries = Array.make Conf.entries None in
             List.iter
-              (fun { Bin.index; hash } -> entries.(index) <- entry (lazy hash))
+              (fun { Bin.index; hash } ->
+                entries.(index) <-
+                  Some { target = None; target_hash = lazy hash })
               t.entries;
             Tree { depth = t.Bin.depth; length = t.length; entries }
       in
       { hash = t.Bin.hash; stable = t.Bin.stable; v }
 
-    let pre_hash_bin = Irmin.Type.(unstage (pre_hash Bin.v_t))
-
-    let v_t t : v Irmin.Type.t =
-      let open Irmin.Type in
-      let pre_hash = stage (fun x -> pre_hash_bin (to_bin_v x)) in
-      let entry = option (ptr_t t) in
-      variant "Inode.v" (fun values tree -> function
-        | Values v -> values v | Tree i -> tree i)
-      |~ case1 "Values" (StepMap.t value_t) (fun t -> Values t)
-      |~ case1 "Tree" (tree_t entry) (fun t -> Tree t)
-      |> sealv
-      |> like ~pre_hash
-
-    let t : t Irmin.Type.t =
-      let open Irmin.Type in
-      mu @@ fun t ->
-      let v = v_t t in
-      let t =
-        record "Inode.t" (fun hash stable v -> { hash = lazy hash; stable; v })
-        |+ field "hash" H.t (fun t -> Lazy.force t.hash)
-        |+ field "stable" bool (fun t -> t.stable)
-        |+ field "v" v (fun t -> t.v)
-        |> sealr
-      in
-      let pre_hash = Irmin.Type.unstage (Irmin.Type.pre_hash v) in
-      like ~pre_hash:(stage @@ fun x -> pre_hash x.v) t
-
-    let empty =
+    let empty : 'a layout -> 'a t =
+     fun _ ->
       let hash = lazy (Node.hash Node.empty) in
       { stable = true; hash; v = Values StepMap.empty }
 
-    let values vs =
+    let values : 'a layout -> _ -> 'a t =
+     fun la vs ->
       let length = StepMap.cardinal vs in
-      if length = 0 then empty
+      if length = 0 then empty la
       else
         let v = Values vs in
-        let hash = lazy (Bin.V.hash (to_bin_v v)) in
+        let hash = lazy (Bin.V.hash (to_bin_v la v)) in
         { hash; stable = false; v }
 
-    let tree is =
+    let tree la is =
       let v = Tree is in
-      let hash = lazy (Bin.V.hash (to_bin_v v)) in
+      let hash = lazy (Bin.V.hash (to_bin_v la v)) in
       { hash; stable = false; v }
 
-    let of_values l = values (StepMap.of_list l)
+    let of_values la l = values la (StepMap.of_list l)
 
     let is_empty t =
       match t.v with Values vs -> StepMap.is_empty vs | Tree _ -> false
 
-    let find_value ~depth ~find t s =
+    let find_value la ~depth t s =
+      let target_of_ptr = Ptr.target la in
       let rec aux ~depth = function
         | Values vs -> ( try Some (StepMap.find s vs) with Not_found -> None)
         | Tree t -> (
@@ -497,29 +490,29 @@ struct
             let x = t.entries.(i) in
             match x with
             | None -> None
-            | Some i -> aux ~depth:(depth + 1) (get_target ~find i).v)
+            | Some i -> aux ~depth:(depth + 1) (target_of_ptr i).v)
       in
       aux ~depth t.v
 
-    let find ~find t s = find_value ~depth:0 ~find t s
+    let find la t s = find_value ~depth:0 la t s
 
-    let rec add ~depth ~find ~copy ~replace t s v k =
+    let rec add la ~depth ~copy ~replace t s v k =
       match t.v with
       | Values vs ->
           let length =
             if replace then StepMap.cardinal vs else StepMap.cardinal vs + 1
           in
           let t =
-            if length <= Conf.entries then values (StepMap.add s v vs)
+            if length <= Conf.entries then values la (StepMap.add s v vs)
             else
               let vs = StepMap.bindings (StepMap.add s v vs) in
               let empty =
-                tree
+                tree la
                   { length = 0; depth; entries = Array.make Conf.entries None }
               in
               let aux t (s, v) =
-                (add [@tailcall]) ~depth ~find ~copy:false ~replace t s v
-                  (fun x -> x)
+                (add [@tailcall]) la ~depth ~copy:false ~replace t s v (fun x ->
+                    x)
               in
               List.fold_left aux empty vs
           in
@@ -530,39 +523,39 @@ struct
           let i = index ~depth s in
           match entries.(i) with
           | None ->
-              let target = values (StepMap.singleton s v) in
-              entries.(i) <- entry ~target target.hash;
-              let t = tree { depth; length; entries } in
+              let target = values la (StepMap.singleton s v) in
+              entries.(i) <- Some (Ptr.of_target la target);
+              let t = tree la { depth; length; entries } in
               k t
           | Some n ->
-              let t = get_target ~find n in
-              add ~depth:(depth + 1) ~find ~copy ~replace t s v @@ fun target ->
-              entries.(i) <- entry ~target target.hash;
-              let t = tree { depth; length; entries } in
+              let t = Ptr.target la n in
+              add la ~depth:(depth + 1) ~copy ~replace t s v @@ fun target ->
+              entries.(i) <- Some (Ptr.of_target la target);
+              let t = tree la { depth; length; entries } in
               k t)
 
-    let add ~find ~copy t s v =
+    let add la ~copy t s v =
       (* XXX: [find_value ~depth:42] should break the unit tests. It doesn't. *)
-      match find_value ~depth:0 ~find t s with
-      | Some v' when equal_value v v' -> stabilize ~find t
-      | Some _ -> add ~depth:0 ~find ~copy ~replace:true t s v (stabilize ~find)
-      | None -> add ~depth:0 ~find ~copy ~replace:false t s v (stabilize ~find)
+      match find_value ~depth:0 la t s with
+      | Some v' when equal_value v v' -> stabilize la t
+      | Some _ -> add ~depth:0 la ~copy ~replace:true t s v (stabilize la)
+      | None -> add ~depth:0 la ~copy ~replace:false t s v (stabilize la)
 
-    let rec remove ~depth ~find t s k =
+    let rec remove la ~depth t s k =
       match t.v with
       | Values vs ->
-          let t = values (StepMap.remove s vs) in
+          let t = values la (StepMap.remove s vs) in
           k t
       | Tree t -> (
           let len = t.length - 1 in
           if len <= Conf.entries then
             let vs =
-              list_tree ~offset:0 ~length:t.length ~find (empty_acc t.length) t
+              list_tree la ~offset:0 ~length:t.length (empty_acc t.length) t
             in
             let vs = List.concat (List.rev vs.values) in
             let vs = StepMap.of_list vs in
             let vs = StepMap.remove s vs in
-            let t = values vs in
+            let t = values la vs in
             k t
           else
             let entries = Array.copy t.entries in
@@ -570,50 +563,49 @@ struct
             match entries.(i) with
             | None -> assert false
             | Some t ->
-                let t = get_target ~find t in
+                let t = Ptr.target la t in
                 if length t = 1 then (
                   entries.(i) <- None;
-                  let t = tree { depth; length = len; entries } in
+                  let t = tree la { depth; length = len; entries } in
                   k t)
                 else
-                  remove ~depth:(depth + 1) ~find t s @@ fun target ->
-                  entries.(i) <- entry ~target (lazy (hash target));
-                  let t = tree { depth; length = len; entries } in
+                  remove ~depth:(depth + 1) la t s @@ fun target ->
+                  entries.(i) <- Some (Ptr.of_target la target);
+                  let t = tree la { depth; length = len; entries } in
                   k t)
 
-    let remove ~find t s =
+    let remove la t s =
       (* XXX: [find_value ~depth:42] should break the unit tests. It doesn't. *)
-      match find_value ~depth:0 ~find t s with
-      | None -> stabilize ~find t
-      | Some _ -> remove ~find ~depth:0 t s (stabilize ~find)
+      match find_value la ~depth:0 t s with
+      | None -> stabilize la t
+      | Some _ -> remove la ~depth:0 t s (stabilize la)
 
-    let v l : t =
+    let v l =
       let len = List.length l in
-      let find _ = assert false in
       let t =
-        if len <= Conf.entries then of_values l
+        if len <= Conf.entries then of_values Total l
         else
-          let aux acc (s, v) = add ~find ~copy:false acc s v in
-          List.fold_left aux empty l
+          let aux acc (s, v) = add Total ~copy:false acc s v in
+          List.fold_left aux (empty Total) l
       in
-      stabilize ~find t
+      stabilize Total t
 
-    let add ~find t s v = add ~find ~copy:true t s v
-
-    let save ~add ~mem t =
+    let save la ~add ~mem t =
+      let iter_entries =
+        let iter_ptr = Ptr.iter la in
+        fun f arr -> Array.iter (Option.iter (iter_ptr f)) arr
+      in
       let rec aux ~depth t =
         Log.debug (fun l -> l "save depth:%d" depth);
         match t.v with
-        | Values _ -> add (Lazy.force t.hash) (to_bin t)
+        | Values _ -> add (Lazy.force t.hash) (to_bin la t)
         | Tree n ->
-            Array.iter
-              (function
-                | None | Some { target = None; _ } -> ()
-                | Some ({ target = Some t; _ } as i) ->
-                    let hash = hash_of_ptr i in
-                    if mem hash then () else aux ~depth:(depth + 1) t)
+            iter_entries
+              (fun t ->
+                let hash = Lazy.force t.hash in
+                if mem hash then () else aux ~depth:(depth + 1) t)
               n.entries;
-            add (Lazy.force t.hash) (to_bin t)
+            add (Lazy.force t.hash) (to_bin la t)
       in
       aux ~depth:0 t
   end
@@ -725,53 +717,79 @@ struct
     include T
     module I = Val_impl
 
-    type t = { find : H.t -> I.t option; v : I.t }
+    type t =
+      | Partial of I.lazy_ptr I.layout * I.lazy_ptr I.t
+      | Total of I.direct_ptr I.layout * I.direct_ptr I.t
+      | Flaky of I.lazy_ptr I.layout * I.lazy_ptr I.t
 
-    let pred t = I.pred t.v
-    let niet _ = assert false
+    type 'b apply_fn = { f : 'a. 'a I.layout -> 'a I.t -> 'b } [@@unboxed]
 
-    let v l =
-      let v = I.v l in
-      { find = niet; v }
+    let apply : t -> 'b apply_fn -> 'b =
+     fun t f ->
+      match t with
+      | Partial (la, v) -> f.f la v
+      | Total (la, v) -> f.f la v
+      | Flaky (la, v) -> f.f la v
 
-    let list ?offset ?length t = I.list ~find:t.find ?offset ?length t.v
-    let empty = { find = niet; v = I.empty }
-    let is_empty t = I.is_empty t.v
-    let find t s = I.find ~find:t.find t.v s
+    type map_fn = { f : 'a. 'a I.layout -> 'a I.t -> 'a I.t } [@@unboxed]
 
-    let add t s v =
-      let v = I.add ~find:t.find t.v s v in
-      if v == t.v then t else { t with v }
+    let map : t -> map_fn -> t =
+     fun t f ->
+      match t with
+      | Partial (la, v) ->
+          let v' = f.f la v in
+          if v == v' then t else Partial (la, v')
+      | Total (la, v) ->
+          let v' = f.f la v in
+          if v == v' then t else Total (la, v')
+      | Flaky (la, v) ->
+          let v' = f.f la v in
+          if v == v' then t else Flaky (la, v')
 
-    let remove t s =
-      let v = I.remove ~find:t.find t.v s in
-      if v == t.v then t else { t with v }
+    let pred t = apply t { f = (fun la v -> I.pred la v) }
+    let v l = Total (I.Total, I.v l)
 
-    let pre_hash_i = Irmin.Type.(unstage (pre_hash I.t))
+    let list ?offset ?length t =
+      apply t { f = (fun la v -> I.list la ?offset ?length v) }
+
+    let empty = v []
+    let is_empty t = apply t { f = (fun _ v -> I.is_empty v) }
+    let find t s = apply t { f = (fun la v -> I.find la v s) }
+
+    let add t s value =
+      map t { f = (fun la v -> I.add ~copy:true la v s value) }
+
+    let remove t s = map t { f = (fun la v -> I.remove la v s) }
+    let pre_hash_binv = Irmin.Type.(unstage (pre_hash Bin.v_t))
     let pre_hash_node = Irmin.Type.(unstage (pre_hash Node.t))
 
     let t : t Irmin.Type.t =
       let pre_hash =
         Irmin.Type.stage @@ fun x ->
-        if not x.v.stable then pre_hash_i x.v
+        let stable = apply x { f = (fun _ v -> I.stable v) } in
+        if not stable then
+          let bin = apply x { f = (fun la v -> I.to_bin la v) } in
+          pre_hash_binv bin.v
         else
           let vs = list x in
           pre_hash_node (Node.v vs)
       in
-      Irmin.Type.map I.t ~pre_hash (fun v -> { find = niet; v }) (fun t -> t.v)
+      Irmin.Type.map ~pre_hash Bin.t
+        (fun bin -> Flaky (Val_impl.Flaky, I.of_bin bin))
+        (fun x -> apply x { f = (fun la v -> I.to_bin la v) })
 
-    let hash t = I.hash t.v
-    let save ~add ~mem { v; _ } = I.save ~add ~mem v
+    let hash t = apply t { f = (fun _ v -> I.hash v) }
+    let save ~add ~mem t = apply t { f = (fun la v -> I.save la ~add ~mem v) }
 
     let of_bin find v =
       let find h =
         match find h with None -> None | Some v -> Some (I.of_bin v)
       in
-      { v = I.of_bin v; find }
+      Partial (I.Partial find, I.of_bin v)
 
-    let to_bin { v; _ } = I.to_bin v
-    let stable t = I.stable t.v
-    let length t = I.length t.v
+    let to_bin t = apply t { f = (fun la v -> I.to_bin la v) }
+    let stable t = apply t { f = (fun _ v -> I.stable v) }
+    let length t = apply t { f = (fun _ v -> I.length v) }
     let index = I.index
   end
 end
