@@ -260,31 +260,50 @@ struct
 
     let equal_value = Irmin.Type.(unstage (equal value_t))
 
-    type 'a layout =
-      | Partial : (hash -> lazy_ptr t option) -> lazy_ptr layout
-      | Total : direct_ptr layout
-      | Flaky : lazy_ptr layout
+    type vmap = value StepMap.t
+    type vlist = (step * value) list
 
-    and lazy_ptr = {
+    type ('ptr, 'vals) layout =
+      | Partial :
+          (hash -> (vmap lazy_ptr, vmap) t option)
+          -> (vmap lazy_ptr, vmap) layout
+      | Total : (vmap direct_ptr, vmap) layout
+      | Flaky : (vmap lazy_ptr, vmap) layout
+      | Temp : (vlist direct_ptr, vlist) layout
+
+    and 'vals lazy_ptr = {
       target_hash : hash Lazy.t;
-      mutable target : lazy_ptr t option;
+      mutable target : ('vals lazy_ptr, 'vals) t option;
     }
 
-    and direct_ptr = Ptr of direct_ptr t [@@unboxed]
+    and 'vals direct_ptr = Ptr of ('vals direct_ptr, 'vals) t [@@unboxed]
 
-    and 'ptr tree = { depth : int; length : int; entries : 'ptr option array }
+    and ('ptr, 'vals) tree = {
+      depth : int;
+      length : int;
+      entries : 'ptr option array;
+    }
 
-    and 'ptr v = Values of value StepMap.t | Tree of 'ptr tree
+    and ('ptr, 'vals) v = Values of 'vals | Tree of ('ptr, 'vals) tree
 
-    and 'ptr t = { hash : hash Lazy.t; stable : bool; v : 'ptr v }
+    and ('ptr, 'vals) t = {
+      hash : hash Lazy.t;
+      stable : bool;
+      v : ('ptr, 'vals) v;
+    }
+
+    let _ = Temp
 
     module Ptr = struct
-      let hash : type ptr. ptr layout -> ptr -> _ = function
+      let hash : type ptr vals. (ptr, vals) layout -> ptr -> _ = function
         | Total -> fun (Ptr ptr) -> Lazy.force ptr.hash
         | Partial _ -> fun { target_hash; _ } -> Lazy.force target_hash
         | Flaky -> fun { target_hash; _ } -> Lazy.force target_hash
+        | Temp -> fun (Ptr ptr) -> Lazy.force ptr.hash
 
-      let target : type ptr. ptr layout -> ptr -> ptr t =
+      (* | Temp -> failwith "tmp hash" *)
+
+      let target : type ptr vals. (ptr, vals) layout -> ptr -> (ptr, vals) t =
        fun la ->
         match la with
         | Total -> fun (Ptr t) -> t
@@ -305,21 +324,67 @@ struct
                 failwith
                   "Impossible to load the subtree on an inode unserialized \
                    using Repr")
+        | Temp -> fun (Ptr t) -> t
 
-      let of_target : type ptr. ptr layout -> ptr t -> ptr = function
+      let of_target : type ptr vals. (ptr, vals) layout -> (ptr, vals) t -> ptr
+          = function
         | Total -> fun target -> Ptr target
         | Partial _ ->
             fun target -> { target = Some target; target_hash = target.hash }
         | Flaky ->
             fun target -> { target = Some target; target_hash = target.hash }
+        | Temp -> fun target -> Ptr target
 
-      let iter : type ptr. ptr layout -> (ptr t -> unit) -> ptr -> unit =
+      let iter :
+          type ptr vals.
+          (ptr, vals) layout -> ((ptr, vals) t -> unit) -> ptr -> unit =
         function
         | Total -> fun f (Ptr entry) -> f entry
         | Partial _ -> (
             fun f -> function { target = Some entry; _ } -> f entry | _ -> ())
         | Flaky -> (
             fun f -> function { target = Some entry; _ } -> f entry | _ -> ())
+        | Temp -> failwith "tmp iter"
+    end
+
+    module Values = struct
+      let empty : type ptr vals. (ptr, vals) layout -> vals = function
+        | Total -> StepMap.empty
+        | Partial _ -> StepMap.empty
+        | Flaky -> StepMap.empty
+        | Temp -> []
+
+      let length : type ptr vals. (ptr, vals) layout -> vals -> int = function
+        | Total -> StepMap.cardinal
+        | Partial _ -> StepMap.cardinal
+        | Flaky -> StepMap.cardinal
+        | Temp -> List.length
+
+      let bindings :
+          type ptr vals. (ptr, vals) layout -> vals -> (step * value) list =
+        function
+        | Total -> StepMap.bindings
+        | Partial _ -> StepMap.bindings
+        | Flaky -> StepMap.bindings
+        | Temp -> Fun.id
+
+      let singleton : type ptr vals. (ptr, vals) layout -> step -> value -> vals
+          = function
+        | Total -> StepMap.singleton
+        | Partial _ -> StepMap.singleton
+        | Flaky -> StepMap.singleton
+        | Temp -> fun s v -> [ (s, v) ]
+
+      let add :
+          type ptr vals.
+          (ptr, vals) layout -> replace:bool -> step -> value -> vals -> vals =
+        function
+        | Total -> fun ~replace:_ -> StepMap.add
+        | Partial _ -> fun ~replace:_ -> StepMap.add
+        | Flaky -> fun ~replace:_ -> StepMap.add
+        | Temp ->
+            fun ~replace s v t ->
+              if replace then (s, v) :: List.remove_assoc s t else (s, v) :: t
     end
 
     let pred la t =
@@ -402,7 +467,7 @@ struct
 
     let to_bin_v la = function
       | Values vs ->
-          let vs = StepMap.bindings vs in
+          let vs = Values.bindings la vs in
           Bin.Values vs
       | Tree t ->
           let hash_of_ptr = Ptr.hash la in
@@ -457,14 +522,14 @@ struct
       in
       { hash = t.Bin.hash; stable = t.Bin.stable; v }
 
-    let empty : 'a layout -> 'a t =
-     fun _ ->
+    let empty : ('a, 'b) layout -> ('a, 'b) t =
+     fun la ->
       let hash = lazy (Node.hash Node.empty) in
-      { stable = true; hash; v = Values StepMap.empty }
+      { stable = true; hash; v = Values (Values.empty la) }
 
-    let values : 'a layout -> _ -> 'a t =
+    let values : ('a, 'b) layout -> _ -> ('a, 'b) t =
      fun la vs ->
-      let length = StepMap.cardinal vs in
+      let length = Values.length la vs in
       if length = 0 then empty la
       else
         let v = Values vs in
@@ -496,23 +561,24 @@ struct
 
     let find la t s = find_value ~depth:0 la t s
 
-    let rec add la ~depth ~copy ~replace t s v k =
+    let rec add_rec la ~depth ~copy ~replace t s v k =
       match t.v with
       | Values vs ->
           let length =
-            if replace then StepMap.cardinal vs else StepMap.cardinal vs + 1
+            if replace then Values.length la vs else Values.length la vs + 1
           in
           let t =
-            if length <= Conf.entries then values la (StepMap.add s v vs)
+            if length <= Conf.entries then
+              values la (Values.add ~replace la s v vs)
             else
-              let vs = StepMap.bindings (StepMap.add s v vs) in
+              let vs = Values.bindings la (Values.add ~replace la s v vs) in
               let empty =
                 tree la
                   { length = 0; depth; entries = Array.make Conf.entries None }
               in
               let aux t (s, v) =
-                (add [@tailcall]) la ~depth ~copy:false ~replace t s v (fun x ->
-                    x)
+                (add_rec [@tailcall]) la ~depth ~copy:false ~replace t s v
+                  (fun x -> x)
               in
               List.fold_left aux empty vs
           in
@@ -523,13 +589,14 @@ struct
           let i = index ~depth s in
           match entries.(i) with
           | None ->
-              let target = values la (StepMap.singleton s v) in
+              let target = values la (Values.singleton la s v) in
               entries.(i) <- Some (Ptr.of_target la target);
               let t = tree la { depth; length; entries } in
               k t
           | Some n ->
               let t = Ptr.target la n in
-              add la ~depth:(depth + 1) ~copy ~replace t s v @@ fun target ->
+              add_rec la ~depth:(depth + 1) ~copy ~replace t s v
+              @@ fun target ->
               entries.(i) <- Some (Ptr.of_target la target);
               let t = tree la { depth; length; entries } in
               k t)
@@ -538,8 +605,8 @@ struct
       (* XXX: [find_value ~depth:42] should break the unit tests. It doesn't. *)
       match find_value ~depth:0 la t s with
       | Some v' when equal_value v v' -> stabilize la t
-      | Some _ -> add ~depth:0 la ~copy ~replace:true t s v (stabilize la)
-      | None -> add ~depth:0 la ~copy ~replace:false t s v (stabilize la)
+      | Some _ -> add_rec ~depth:0 la ~copy ~replace:true t s v (stabilize la)
+      | None -> add_rec ~depth:0 la ~copy ~replace:false t s v (stabilize la)
 
     let rec remove la ~depth t s k =
       match t.v with
@@ -580,13 +647,39 @@ struct
       | None -> stabilize la t
       | Some _ -> remove la ~depth:0 t s (stabilize la)
 
+    let total_of_temp : (vlist direct_ptr, vlist) t -> (vmap direct_ptr, vmap) t
+        =
+     fun t ->
+      let rec aux_t = function
+        (* The hashes have to be recomputed because the ones built
+           during Temp mode are bad *)
+        | { v = Values vs; _ } -> values Total (StepMap.of_list vs)
+        | { v = Tree t; _ } -> tree Total (aux_tree t)
+      and aux_tree { depth; length; entries } =
+        { depth; length; entries = Array.map aux_entry entries }
+      and aux_entry = function
+        | None -> None
+        | Some (Ptr t) -> Some (Ptr (aux_t t))
+      in
+      aux_t t
+
     let v l =
+      (* XXX: Add unit test with several identical keys in l *)
       let len = List.length l in
+      (* Improvement 1: Only build stepmaps when we are done
+       * Improvement 2: No more calls to find
+       * Improvement 3: No more stabilize of intermediate values
+       *)
       let t =
         if len <= Conf.entries then of_values Total l
         else
-          let aux acc (s, v) = add Total ~copy:false acc s v in
-          List.fold_left aux (empty Total) l
+          let added = Hashtbl.create len in
+          let aux acc (s, v) =
+            let replace = Hashtbl.mem added s in
+            if not replace then Hashtbl.add added s ();
+            add_rec Temp ~depth:0 ~copy:false ~replace acc s v Fun.id
+          in
+          List.fold_left aux (empty Temp) l |> total_of_temp
       in
       stabilize Total t
 
@@ -717,12 +810,17 @@ struct
     include T
     module I = Val_impl
 
-    type t =
-      | Partial of I.lazy_ptr I.layout * I.lazy_ptr I.t
-      | Total of I.direct_ptr I.layout * I.direct_ptr I.t
-      | Flaky of I.lazy_ptr I.layout * I.lazy_ptr I.t
+    type vmap = value StepMap.t
 
-    type 'b apply_fn = { f : 'a. 'a I.layout -> 'a I.t -> 'b } [@@unboxed]
+    type t =
+      | Partial of
+          (vmap I.lazy_ptr, vmap) I.layout * (vmap I.lazy_ptr, vmap) I.t
+      | Total of
+          (vmap I.direct_ptr, vmap) I.layout * (vmap I.direct_ptr, vmap) I.t
+      | Flaky of (vmap I.lazy_ptr, vmap) I.layout * (vmap I.lazy_ptr, vmap) I.t
+
+    type 'b apply_fn = { f : 'a. ('a, vmap) I.layout -> ('a, vmap) I.t -> 'b }
+    [@@unboxed]
 
     let apply : t -> 'b apply_fn -> 'b =
      fun t f ->
@@ -731,7 +829,10 @@ struct
       | Total (la, v) -> f.f la v
       | Flaky (la, v) -> f.f la v
 
-    type map_fn = { f : 'a. 'a I.layout -> 'a I.t -> 'a I.t } [@@unboxed]
+    type map_fn = {
+      f : 'a. ('a, vmap) I.layout -> ('a, vmap) I.t -> ('a, vmap) I.t;
+    }
+    [@@unboxed]
 
     let map : t -> map_fn -> t =
      fun t f ->
