@@ -18,6 +18,11 @@
 open! Import
 include Tree_intf
 
+let g0 = ref 0
+let print s = if !g0 == 31 then Printf.eprintf "%s\n%!" s
+let print2 s = if !g0 > 25 then Printf.eprintf "%s\n%!" s
+let _ = (g0, print)
+
 let rec drop n (l : 'a Seq.t) () =
   match l () with
   | l' when n = 0 -> l'
@@ -469,12 +474,17 @@ module Make (P : Private.S) = struct
           v
       | _, v -> v
 
+    let stack = ref []
+    let _ = stack
+
     let rec hash : type a. t -> (hash -> a) -> a =
      fun t k ->
+      (* Printf.sprintf "   hash" |> print; *)
       match cached_hash t with
       | Some h -> k h
       | None -> (
           let a_of_value v =
+            (* Printf.sprintf "   hash@a_of_value" |> print; *)
             cnt.node_hash <- cnt.node_hash + 1;
             let h = P.Node.Key.hash v in
             t.info.hash <- Some h;
@@ -491,6 +501,14 @@ module Make (P : Private.S) = struct
 
     and value_of_map : type r. t -> map -> (value, r) cont =
      fun t map k ->
+      Printf.sprintf "[%s]   value_of_map of len %d, first:%s, last:%s"
+        (List.map (Repr.to_string P.Node.Val.step_t) !stack
+        |> List.rev
+        |> String.concat "/")
+        (StepMap.cardinal map)
+        (StepMap.min_binding map |> fst |> Repr.to_string P.Node.Val.step_t)
+        (StepMap.max_binding map |> fst |> Repr.to_string P.Node.Val.step_t)
+      |> print;
       if StepMap.is_empty map then (
         t.info.value <- Some P.Node.Val.empty;
         k P.Node.Val.empty)
@@ -507,25 +525,34 @@ module Make (P : Private.S) = struct
               | `Contents (c, m) ->
                   let v = `Contents (Contents.hash c, m) in
                   (aux [@tailcall]) ((step, v) :: acc) rest
-              | `Node n -> hash n (fun h -> aux ((step, `Node h) :: acc) rest))
+              | `Node n ->
+                  stack := step :: !stack;
+                  hash n (fun h ->
+                      stack := List.tl !stack;
+                      aux ((step, `Node h) :: acc) rest))
         in
         aux [] alist
 
     and value_of_elt : type r. elt -> (P.Node.Val.value, r) cont =
      fun e k ->
+      (* Printf.sprintf "   value_of_elt" |> print; *)
       match e with
       | `Contents (c, m) -> k (`Contents (Contents.hash c, m))
       | `Node n -> hash n (fun h -> k (`Node h))
 
     and value_of_adds : type r. t -> value -> _ -> (value, r) cont =
      fun t v added k ->
+      (* Printf.sprintf "   value_of_adds" |> print; *)
       let added = StepMap.bindings added in
       let rec aux acc = function
         | [] ->
             t.info.value <- Some acc;
             k acc
         | (k, e) :: rest ->
-            value_of_elt e (fun e -> aux (P.Node.Val.add acc k e) rest)
+            stack := k :: !stack;
+            value_of_elt e (fun e ->
+                stack := List.tl !stack;
+                aux (P.Node.Val.add acc k e) rest)
       in
       aux v added
 
@@ -553,6 +580,7 @@ module Make (P : Private.S) = struct
           | Hash (repo, h) -> value_of_hash t repo h)
 
     let to_map t =
+      let+ res =
       match cached_map t with
       | Some m -> Lwt.return (Ok m)
       | None -> (
@@ -573,6 +601,13 @@ module Make (P : Private.S) = struct
               value_of_hash t repo k >|= function
               | Error _ as e -> e
               | Ok v -> Ok (of_value repo v None)))
+      in
+      (match res with
+      | Ok m -> let len = StepMap.cardinal m in
+                if len > 1000 then
+                  Printf.eprintf "to_map of len %d --------------------------------------------------\n%!" len
+      | _ -> ());
+      res
 
     let hash_equal x y = x == y || equal_hash x y
 
@@ -1125,6 +1160,8 @@ module Make (P : Private.S) = struct
 
   let add_tree t k v =
     Log.debug (fun l -> l "Tree.add_tree %a" pp_path k);
+    Printf.eprintf "> Add tree %s !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n%!"
+      (Repr.to_string Path.t k);
     let empty = empty_node t in
     match Path.rdecons k with
     | None -> Lwt.return v
@@ -1200,6 +1237,69 @@ module Make (P : Private.S) = struct
   let value_of_map t map = Node.value_of_map t map (fun x -> x)
 
   let export ?clear repo contents_t node_t n =
+    incr g0;
+    let g0 = !g0 in
+    ignore g0;
+    let g1 = ref 0 in
+    ignore g1;
+
+    let n : node = n in
+    let rec dumpn ?(d = 0) n =
+      let prefix = String.init  (d * 2 + 2) (fun _ -> '>') in
+      let open Node in
+      match n with
+      | { v = Node.Map _; _ } -> Printf.sprintf "%sMap" prefix
+      | { v = Node.Hash _; _ } -> Printf.sprintf "%sHash" prefix
+      | { v = Node.Value (_, _v, None); _ } -> Printf.sprintf "%sValue None" prefix
+      | { v = Node.Value (_, v, Some map); _ } ->
+
+         let lower =
+           StepMap.bindings map
+           |> List.map (fun (s, n) ->
+                  (* Printf.eprintf "lol\n%!"; *)
+                  let s = Repr.to_string P.Node.Val.step_t s in
+                  if s = "data" || s = "commitments" then (
+                    match n with
+                    | `Contents _ -> "\nContents"
+                    | `Node n -> "\n" ^ (dumpn ~d:(d + 1) n)
+                  )
+                  else
+                    ""
+                )
+           |> String.concat ""
+         in
+
+          Printf.sprintf "%sValue (%s) Some (%s)%s" prefix
+            (let l = P.Node.Val.list v in
+             if List.length l < 5 || List.length l = 0 then
+               l
+               |> List.map fst
+               |> List.map (Repr.to_string P.Node.Val.step_t)
+               |> String.concat ";"
+             else Printf.sprintf "len:%d" (List.length l))
+            (let l = StepMap.bindings map in
+             if List.length l < 5 || List.length l = 0 then
+               l
+               |> List.map fst
+               |> List.map (Repr.to_string P.Node.Val.step_t)
+               |> String.concat ";"
+             else Printf.sprintf "len:%d" (List.length l))
+            lower
+         ;
+
+      (* (StepMap.cardinal map) *)
+      (* Printf.eprintf "> export on `Node Value (len:%d) Some (len:%d)\n%!"
+       *   (P.Node.Val.list v |> List.length)
+       *   (StepMap.cardinal map) *)
+    in
+
+    (* Printf.eprintf "> export on %s\n%!" (dumpn n); *)
+    Printf.eprintf "> export ******************************\n%!";
+    Printf.sprintf
+      "| export | begining of the frame \
+       ****************************************"
+    |> print;
+
     let seen = Hashes.create 127 in
     let add_node n v () =
       cnt.node_add <- cnt.node_add + 1;
@@ -1219,7 +1319,12 @@ module Make (P : Private.S) = struct
     let todo = Stack.create () in
     let rec add_to_todo : type a. _ -> (unit -> a Lwt.t) -> a Lwt.t =
      fun n k ->
+      Printf.sprintf "> add_to_todo %s" (dumpn n) |> print2;
+      (* Printf.sprintf "> add_to_todo" |> print; *)
+      if g0 = 31 && !g1 = 1 then failwith "Stop!";
+      incr g1;
       let h = Node.hash n in
+      Printf.sprintf "| add_to_todo / %s" (Repr.to_string P.Hash.t h) |> print;
       if Hashes.mem seen h then k ()
       else (
         Hashes.add seen h ();

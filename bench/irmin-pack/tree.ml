@@ -151,6 +151,9 @@ struct
     (i + 1, prev_commit)
 
   let exec_remove t _repo prev_commit _n i keys () =
+    Printf.eprintf "exec_remove %s\n%!"
+      (String.concat "/" keys)
+    ;
     let+ tree = Store.Tree.remove t.tree keys in
     t.tree <- tree;
     (i + 1, prev_commit)

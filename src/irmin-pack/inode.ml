@@ -587,8 +587,16 @@ struct
       | None -> stabilize ~find t
       | Some _ -> remove ~find ~depth:0 t s (stabilize ~find)
 
+    let count = ref 0
+
     let v l : t =
       let len = List.length l in
+      incr count;
+      let count = !count in
+      ignore count;
+      ignore len;
+      (* Printf.eprintf "%03d %7d\n%!" count len; *)
+
       let find _ = assert false in
       let t =
         if len <= Conf.entries then of_values l
