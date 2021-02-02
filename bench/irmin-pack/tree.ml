@@ -221,12 +221,16 @@ struct
       (0, prev_commit) operations
 
   let add_commits repo commits () =
+    with_progress_bar ~message:"Replaying trace" ~n:(Array.length commits)
+      ~unit:"commits" ~sampling_interval:50
+    @@ fun prog ->
     let t = { tree = Store.Tree.empty } in
     let rec array_iter_lwt prev_commit i =
       if i >= Array.length commits then Lwt.return_unit
       else
         let operations = commits.(i) in
         let* _, prev_commit = add_operations t repo prev_commit operations i in
+        prog Int64.one;
         array_iter_lwt prev_commit (i + 1)
     in
     array_iter_lwt None 0
@@ -242,14 +246,7 @@ type config = {
   operations_file : string;
   root : string;
   suite_filter :
-    [ `Slow
-    | `Quick
-    | `Quick_trace
-    | `Quick_large
-    | `Quick_chains
-    | `Slow_trace
-    | `Slow_large
-    | `Slow_chains ];
+    [ `Slow | `Quick | `Custom_trace | `Custom_large | `Custom_chains ];
   collapse : bool;
 }
 
@@ -293,12 +290,15 @@ struct
         let* tree = f tree in
         Store.Commit.v repo ~info:(info ()) ~parents:[ prev_commit ] tree
 
-  let add_commits repo ncommits f () =
+  let add_commits ~message repo ncommits f () =
+    with_progress_bar ~message ~n:ncommits ~unit:"commits" ~sampling_interval:1
+    @@ fun prog ->
     let* c = init_commit repo in
     let rec aux c i =
       if i >= ncommits then Lwt.return c
       else
         let* c' = checkout_and_commit repo (Store.Commit.hash c) f in
+        prog Int64.one;
         aux c' (i + 1)
     in
     let+ _ = aux c 0 in
@@ -312,19 +312,20 @@ struct
       (match mode with
       | `Large ->
           Trees.add_large_trees config.width config.nlarge_trees
-          |> add_commits repo config.ncommits
+          |> add_commits ~message:"Playing large mode" repo config.ncommits
       | `Chains ->
           Trees.add_chain_trees config.depth config.nchain_trees
-          |> add_commits repo config.ncommits)
+          |> add_commits ~message:"Playing chain mode" repo config.ncommits)
       |> Benchmark.run config
     in
     let+ () = Store.Repo.close repo in
     (config, result)
 
-  let run_read_trace ?quick config =
+  let run_read_trace config =
     reset_stats ();
-    let ncommits = if quick = Some () then 10000 else config.ncommits_trace in
-    let commits, n = Parse_trace.populate_array ncommits config.collapse in
+    let commits, n =
+      Parse_trace.populate_array config.ncommits_trace config.collapse
+    in
     let config = { config with ncommits_trace = n } in
     let conf = Irmin_pack.config ~readonly:false ~fresh:true config.root in
     let* repo = Store.Repo.v conf in
@@ -346,7 +347,7 @@ type mode_elt = [ `Read_trace | `Chains | `Large ]
 
 type suite_elt = {
   mode : mode_elt;
-  speed : [ `Quick | `Slow ];
+  speed : [ `Quick | `Slow | `Custom ];
   inode_config : [ `Entries_32 | `Entries_2 ];
   run : config -> (config * Benchmark.result) Lwt.t;
 }
@@ -357,37 +358,73 @@ let suite : suite_elt list =
       mode = `Read_trace;
       speed = `Quick;
       inode_config = `Entries_32;
-      run = Bench_inodes_32.run_read_trace ~quick:();
+      run =
+        (fun config ->
+          Bench_inodes_32.run_read_trace
+            { config with ncommits_trace = 10000; collapse = false });
     };
     {
       mode = `Read_trace;
       speed = `Slow;
       inode_config = `Entries_32;
+      run =
+        (fun config ->
+          Bench_inodes_32.run_read_trace
+            { config with ncommits_trace = 13315; collapse = false });
+    };
+    {
+      mode = `Chains;
+      speed = `Quick;
+      inode_config = `Entries_32;
+      run =
+        (fun config ->
+          Bench_inodes_32.run ~mode:`Chains
+            { config with ncommits = 2; depth = 1000; nchain_trees = 1 });
+    };
+    {
+      mode = `Chains;
+      speed = `Slow;
+      inode_config = `Entries_2;
+      run =
+        (fun config ->
+          Bench_inodes_2.run ~mode:`Chains
+            { config with ncommits = 2; depth = 1000; nchain_trees = 1 });
+    };
+    {
+      mode = `Large;
+      speed = `Quick;
+      inode_config = `Entries_32;
+      run =
+        (fun config ->
+          Bench_inodes_32.run ~mode:`Large
+            { config with ncommits = 2; width = 1_000_000; nlarge_trees = 1 });
+    };
+    {
+      mode = `Large;
+      speed = `Slow;
+      inode_config = `Entries_2;
+      run =
+        (fun config ->
+          Bench_inodes_2.run ~mode:`Large
+            { config with ncommits = 2; width = 1_000_000; nlarge_trees = 1 });
+    };
+    {
+      mode = `Read_trace;
+      speed = `Custom;
+      inode_config = `Entries_32;
       run = Bench_inodes_32.run_read_trace;
     };
     {
       mode = `Chains;
-      speed = `Quick;
+      speed = `Custom;
       inode_config = `Entries_32;
       run = Bench_inodes_32.run ~mode:`Chains;
     };
     {
-      mode = `Chains;
-      speed = `Slow;
-      inode_config = `Entries_2;
-      run = Bench_inodes_2.run ~mode:`Chains;
-    };
-    {
       mode = `Large;
-      speed = `Quick;
+      speed = `Custom;
       inode_config = `Entries_32;
       run = Bench_inodes_32.run ~mode:`Large;
-    };
-    {
-      mode = `Large;
-      speed = `Slow;
-      inode_config = `Entries_2;
-      run = Bench_inodes_2.run ~mode:`Large;
     };
   ]
 
@@ -430,6 +467,7 @@ let main ncommits ncommits_trace operations_file suite_filter collapse depth
       nlarge_trees;
     }
   in
+
   Printexc.record_backtrace true;
   Random.self_init ();
   FSHelper.rm_dir config.root;
@@ -441,24 +479,21 @@ let main ncommits ncommits_trace operations_file suite_filter collapse depth
             (* The suite contains two `Read_trace benchmarks, let's keep the
                `Slow one only *)
             false
-        | `Slow, _, _ -> true
+        | `Slow, (`Slow | `Quick), _ -> true
         | `Quick, `Quick, _ -> true
-        | `Quick_trace, `Quick, `Read_trace -> true
-        | `Quick_chains, `Quick, `Chains -> true
-        | `Quick_large, `Quick, `Large -> true
-        | `Slow_trace, `Slow, `Read_trace -> true
-        | `Slow_chains, `Slow, `Chains -> true
-        | `Slow_large, `Slow, `Large -> true
+        | `Custom_trace, `Custom, `Read_trace -> true
+        | `Custom_chains, `Custom, `Chains -> true
+        | `Custom_large, `Custom, `Large -> true
         | _, _, _ -> false)
       suite
   in
 
   let run_benchmarks () =
-    Lwt_list.fold_left_s
-      (fun (config, results) (b : suite_elt) ->
+    Lwt_list.fold_right_s
+      (fun (b : suite_elt) (config, results) ->
         let+ config, result = b.run config in
         (config, (b, result) :: results))
-      (config, []) suite
+      suite (config, [])
   in
   let config, results = Lwt_main.run (run_benchmarks ()) in
   let pp_result fmt (b, result) =
@@ -469,21 +504,18 @@ let main ncommits ncommits_trace operations_file suite_filter collapse depth
 
 open Cmdliner
 
-let suite =
-  let suite =
+let mode =
+  let mode =
     [
       ("slow", `Slow);
       ("quick", `Quick);
-      ("quick_trace", `Quick_trace);
-      ("quick_chains", `Quick_chains);
-      ("quick_large", `Quick_large);
-      ("slow_trace", `Slow_trace);
-      ("slow_chains", `Slow_chains);
-      ("slow_large", `Slow_large);
+      ("trace", `Custom_trace);
+      ("chains", `Custom_chains);
+      ("large", `Custom_large);
     ]
   in
-  let doc = Arg.info ~doc:(Arg.doc_alts_enum suite) [ "suite" ] in
-  Arg.(value @@ opt (Arg.enum suite) `Slow doc)
+  let doc = Arg.info ~doc:(Arg.doc_alts_enum mode) [ "mode" ] in
+  Arg.(value @@ opt (Arg.enum mode) `Slow doc)
 
 let collapse =
   let doc =
@@ -543,7 +575,7 @@ let main_term =
     $ ncommits
     $ ncommits_trace
     $ operations_file
-    $ suite
+    $ mode
     $ collapse
     $ depth
     $ width
