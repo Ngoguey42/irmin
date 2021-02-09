@@ -127,6 +127,9 @@ module Make (P : Private.S) = struct
     end
 
     include Map.Make (X)
+
+    let stdlib_merge = merge
+
     include Merge.Map (X)
   end
 
@@ -310,6 +313,10 @@ module Make (P : Private.S) = struct
 
     type elt = [ `Node of t | `Contents of Contents.t * Metadata.t ]
 
+    and update = Add of elt | Remove
+
+    and updatemap = update StepMap.t
+
     and map = elt StepMap.t
 
     and info = {
@@ -322,11 +329,11 @@ module Make (P : Private.S) = struct
     and v =
       | Map of map
       | Hash of repo * hash
-      | Value of repo * value * map option
+      | Value of repo * value * updatemap option
 
     and t = { mutable v : v; mutable info : info }
 
-    let elt_t t : elt Type.t =
+    let elt_t (t : t Type.t) : elt Type.t =
       let open Type in
       variant "Node.value" (fun node contents contents_m -> function
         | `Node x -> node x
@@ -346,7 +353,23 @@ module Make (P : Private.S) = struct
       let of_map m = StepMap.fold (fun k v acc -> (k, v) :: acc) m [] in
       map (list (pair Path.step_t elt)) to_map of_map
 
-    let v_t (m : map Type.t) : v Type.t =
+    let update_t (elt : elt Type.t) : update Type.t =
+      let open Type in
+      variant "Node.update" (fun add remove -> function
+        | Add elt -> add elt | Remove -> remove)
+      |~ case1 "add" elt (fun elt -> Add elt)
+      |~ case0 "remove" Remove
+      |> sealv
+
+    let updatemap_t (elt : elt Type.t) : updatemap Type.t =
+      let open Type in
+      let to_map x =
+        List.fold_left (fun acc (k, v) -> StepMap.add k v acc) StepMap.empty x
+      in
+      let of_map m = StepMap.fold (fun k v acc -> (k, v) :: acc) m [] in
+      map (list (pair Path.step_t (update_t elt))) to_map of_map
+
+    let v_t (m : map Type.t) (um : updatemap Type.t) : v Type.t =
       let open Type in
       variant "Node.node" (fun map hash value -> function
         | Map m -> map m
@@ -354,7 +377,7 @@ module Make (P : Private.S) = struct
         | Value (_, v, m) -> value (v, m))
       |~ case1 "map" m (fun m -> Map m)
       |~ case1 "hash" P.Hash.t (fun _ -> assert false)
-      |~ case1 "value" (pair P.Node.Val.t (option m)) (fun _ -> assert false)
+      |~ case1 "value" (pair P.Node.Val.t (option um)) (fun _ -> assert false)
       |> sealv
 
     let info_is_empty i =
@@ -377,7 +400,7 @@ module Make (P : Private.S) = struct
     let _, t =
       Type.mu2 (fun _ y ->
           let elt = elt_t y in
-          let v = v_t (map_t elt) in
+          let v = v_t (map_t elt) (updatemap_t elt) in
           let t = t v in
           (v, t))
 
@@ -392,9 +415,13 @@ module Make (P : Private.S) = struct
     and clear_maps ~max_depth depth = List.iter (clear_map ~max_depth depth)
 
     and clear_info ~max_depth ?v depth i =
-      let added =
+      let updates =
         match v with
-        | Some (Value (_, _, Some m)) -> StepMap.bindings m
+        | Some (Value (_, _, Some um)) ->
+            StepMap.bindings um
+            |> List.filter_map (function
+                 | _, Remove -> None
+                 | k, Add v -> Some (k, v))
         | _ -> []
       in
       let map =
@@ -410,7 +437,7 @@ module Make (P : Private.S) = struct
         i.map <- None;
         i.hash <- None;
         i.findv_cache <- None);
-      clear_maps ~max_depth depth [ map; added; findv ]
+      clear_maps ~max_depth depth [ map; updates; findv ]
 
     and clear ~max_depth depth t = clear_info ~v:t.v ~max_depth depth t.info
 
@@ -435,7 +462,7 @@ module Make (P : Private.S) = struct
     let dump = Type.pp_json ~minify:false t
     let of_map m = of_v (Map m)
     let of_hash repo k = of_v (Hash (repo, k))
-    let of_value ?added repo v = of_v (Value (repo, v, added))
+    let of_value ?updates repo v = of_v (Value (repo, v, updates))
 
     let empty = function
       | { v = Hash (repo, _) | Value (repo, _, _); _ } ->
@@ -494,7 +521,7 @@ module Make (P : Private.S) = struct
               match t.v with
               | Hash (_, h) -> k h
               | Value (_, v, None) -> a_of_value v
-              | Value (_, v, Some a) -> value_of_adds t v a a_of_value
+              | Value (_, v, Some um) -> value_of_updates t v um a_of_value
               | Map m -> value_of_map t m a_of_value))
 
     and value_of_map : type r. t -> map -> (value, r) cont =
@@ -525,17 +552,18 @@ module Make (P : Private.S) = struct
       | `Contents (c, m) -> k (`Contents (Contents.hash c, m))
       | `Node n -> hash n (fun h -> k (`Node h))
 
-    and value_of_adds : type r. t -> value -> _ -> (value, r) cont =
-     fun t v added k ->
-      let added = StepMap.bindings added in
+    and value_of_updates : type r. t -> value -> _ -> (value, r) cont =
+     fun t v updates k ->
+      let updates = StepMap.bindings updates in
       let rec aux acc = function
         | [] ->
             t.info.value <- Some acc;
             k acc
-        | (k, e) :: rest ->
+        | (k, Add e) :: rest ->
             value_of_elt e (fun e -> aux (P.Node.Val.add acc k e) rest)
+        | (k, Remove) :: rest -> aux (P.Node.Val.remove acc k) rest
       in
-      aux v added
+      aux v updates
 
     let hash k = hash k (fun x -> x)
 
@@ -556,7 +584,7 @@ module Make (P : Private.S) = struct
       | None -> (
           match t.v with
           | Value (_, v, None) -> ok v
-          | Value (_, v, Some m) -> value_of_adds t v m ok
+          | Value (_, v, Some um) -> value_of_updates t v um ok
           | Map m -> value_of_map t m ok
           | Hash (repo, h) -> value_of_hash t repo h)
 
@@ -564,12 +592,20 @@ module Make (P : Private.S) = struct
       match cached_map t with
       | Some m -> Lwt.return (Ok m)
       | None -> (
-          let of_value repo v added =
+          let of_value repo v updates =
             let m = map_of_value repo v in
             let m =
-              match added with
+              match updates with
               | None -> m
-              | Some added -> StepMap.union (fun _ _ a -> Some a) m added
+              | Some updates ->
+                  StepMap.stdlib_merge
+                    (fun _ left right ->
+                      match (left, right) with
+                      | None, None -> assert false
+                      | (Some _ as v), None -> v
+                      | _, Some (Add v) -> Some v
+                      | _, Some Remove -> None)
+                    m updates
             in
             t.info.map <- Some m;
             m
@@ -658,10 +694,10 @@ module Make (P : Private.S) = struct
         match t.v with
         | Map m -> Lwt.return (of_map m)
         | Value (repo, v, None) -> Lwt.return (of_value repo v)
-        | Value (repo, v, Some m) -> (
-            match of_map m with
-            | Some _ as v -> Lwt.return v
-            | None -> Lwt.return (of_value repo v))
+        | Value (repo, v, Some um) -> (
+            match StepMap.find_opt step um with
+            | Some (Add v) -> Lwt.return (Some v)
+            | None | Some Remove -> Lwt.return (of_value repo v))
         | Hash (repo, h) -> (
             match cached_value t with
             | Some v -> Lwt.return (of_value repo v)
@@ -828,14 +864,14 @@ module Make (P : Private.S) = struct
         let m' = StepMap.add step v m in
         if m == m' then t else of_map m'
       in
-      let of_value repo n added =
-        let added' = StepMap.add step v added in
-        if added == added' then t else of_value repo n ~added:added'
+      let of_value repo n updates =
+        let updates' = StepMap.add step (Add v) updates in
+        if updates == updates' then t else of_value repo n ~updates:updates'
       in
       match t.v with
       | Map m -> Lwt.return (of_map m)
       | Value (repo, n, None) -> Lwt.return (of_value repo n StepMap.empty)
-      | Value (repo, n, Some m) -> Lwt.return (of_value repo n m)
+      | Value (repo, n, Some um) -> Lwt.return (of_value repo n um)
       | Hash (repo, h) -> (
           match (cached_value t, cached_map t) with
           | Some v, _ -> Lwt.return (of_value repo v StepMap.empty)
@@ -1236,53 +1272,63 @@ module Make (P : Private.S) = struct
                     (* might happen if the node has already been added
                        (while the thread was block on P.Node.mem *)
                     k ()
-                | Map children | Value (_, _, Some children) ->
-                    (* 1. convert partial values to total values *)
-                    let* () =
-                      match n.v with
-                      | Value (_, _, Some _) -> (
-                          Node.to_value n >|= function
-                          | Error (`Dangling_hash _) -> ()
-                          | Ok v -> n.v <- Value (repo, v, None))
-                      | _ -> Lwt.return_unit
+                | Map children ->
+                    let l = StepMap.bindings children |> List.map snd in
+                    add_steps_to_todo l n k
+                | Value (_, _, Some children) ->
+                    let l =
+                      StepMap.bindings children
+                      |> List.filter_map (function
+                           | _, Node.Remove -> None
+                           | _, Node.Add v -> Some v)
                     in
-                    (* 2. push the current node job on the stack. *)
-                    let () =
-                      match (n.v, Node.cached_value n) with
-                      | _, Some v -> Stack.push (add_node n v) todo
-                      | Map x, None -> Stack.push (add_node_map n x) todo
-                      | _ -> assert false
-                    in
-                    let contents = ref [] in
-                    let nodes = ref [] in
-                    StepMap.iter
-                      (fun _ -> function
-                        | `Contents c -> contents := c :: !contents
-                        | `Node n -> nodes := n :: !nodes)
-                      children;
+                    add_steps_to_todo l n k)))
+    and add_steps_to_todo : type a. _ -> _ -> (unit -> a Lwt.t) -> a Lwt.t =
+     fun l n k ->
+      (* 1. convert partial values to total values *)
+      let* () =
+        match n.Node.v with
+        | Value (_, _, Some _) -> (
+            Node.to_value n >|= function
+            | Error (`Dangling_hash _) -> ()
+            | Ok v -> n.v <- Value (repo, v, None))
+        | _ -> Lwt.return_unit
+      in
+      (* 2. push the current node job on the stack. *)
+      let () =
+        match (n.v, Node.cached_value n) with
+        | _, Some v -> Stack.push (add_node n v) todo
+        | Map x, None -> Stack.push (add_node_map n x) todo
+        | _ -> assert false
+      in
+      let contents = ref [] in
+      let nodes = ref [] in
+      List.iter
+        (function
+          | `Contents c -> contents := c :: !contents
+          | `Node n -> nodes := n :: !nodes)
+        l;
 
-                    (* 2. push the contents job on the stack. *)
-                    List.iter
-                      (fun (c, _) ->
-                        let h = Contents.hash c in
-                        if Hashes.mem seen h then ()
-                        else (
-                          Hashes.add seen h ();
-                          match c.Contents.v with
-                          | Contents.Hash _ -> ()
-                          | Contents.Value x ->
-                              Stack.push (add_contents c x) todo))
-                      !contents;
+      (* 2. push the contents job on the stack. *)
+      List.iter
+        (fun (c, _) ->
+          let h = Contents.hash c in
+          if Hashes.mem seen h then ()
+          else (
+            Hashes.add seen h ();
+            match c.Contents.v with
+            | Contents.Hash _ -> ()
+            | Contents.Value x -> Stack.push (add_contents c x) todo))
+        !contents;
 
-                    (* 3. push the children jobs on the stack. *)
-                    List.iter
-                      (fun n ->
-                        Stack.push
-                          (fun () -> (add_to_todo [@tailcall]) n Lwt.return)
-                          todo)
-                      !nodes;
-                    k ())))
+      (* 3. push the children jobs on the stack. *)
+      List.iter
+        (fun n ->
+          Stack.push (fun () -> (add_to_todo [@tailcall]) n Lwt.return) todo)
+        !nodes;
+      k ()
     in
+
     let rec loop () =
       let task = try Some (Stack.pop todo) with Stack.Empty -> None in
       match task with None -> Lwt.return_unit | Some t -> t () >>= loop
