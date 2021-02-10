@@ -160,8 +160,7 @@ struct
       |> Seq.map snd
       |> Seq.map (fun histo ->
              let count = Bentov.total_count histo in
-             if count = 0 then 0. else
-               Bentov.mean histo *. float_of_int count)
+             if count = 0 then 0. else Bentov.mean histo *. float_of_int count)
       |> Seq.fold_left ( +. ) 0.
     in
     let total = if total = 0. then 1. else total in
@@ -227,20 +226,23 @@ struct
     (* Printf.eprintf "?? exec_add k:</%s> v:<%s>(len%d) %d \n%!"
      *   (String.concat "/" key) v (String.length v) (String.get v 0 |> Char.code)
      * ; *)
-    if trg key then Printf.eprintf "| exec_add  with %s\n%!" (String.concat "/" key);
+    if trg key then
+      Printf.eprintf "| exec_add  with %s\n%!" (String.concat "/" key);
     let v = if trg key then "Salut" else v in
     let+ tree = Store.Tree.add t.tree key v in
     t.tree <- tree;
     (i + 1, prev_commit)
 
   let exec_remove t prev_commit i keys () =
-    if trg keys then Printf.eprintf "| exec_remo with %s\n%!" (String.concat "/" keys);
+    if trg keys then
+      Printf.eprintf "| exec_remo with %s\n%!" (String.concat "/" keys);
     let+ tree = Store.Tree.remove t.tree keys in
     t.tree <- tree;
     (i + 1, prev_commit)
 
   let exec_find t prev_commit n i keys b () =
-    if trg keys then Printf.eprintf "| exec_find with %s\n%!" (String.concat "/" keys);
+    if trg keys then
+      Printf.eprintf "| exec_find with %s\n%!" (String.concat "/" keys);
     let res () =
       Store.Tree.find t.tree keys >|= fun res ->
       (* (if trg keys then
@@ -261,13 +263,15 @@ struct
   (* res *)
 
   let exec_mem t prev_commit n i keys b () =
-    if trg keys then Printf.eprintf "| exec_mem  with %s\n%!" (String.concat "/" keys);
+    if trg keys then
+      Printf.eprintf "| exec_mem  with %s\n%!" (String.concat "/" keys);
     let+ b' = Store.Tree.mem t.tree keys in
     if b <> b' then error_find "mem" keys b i n;
     (i + 1, prev_commit)
 
   let exec_mem_tree t prev_commit n i keys b () =
-    if trg keys then Printf.eprintf "| exec_mete with %s\n%!" (String.concat "/" keys);
+    if trg keys then
+      Printf.eprintf "| exec_mete with %s\n%!" (String.concat "/" keys);
     let+ b' = Store.Tree.mem_tree t.tree keys in
     if b <> b' then error_find "mem_tree" keys b i n;
     (i + 1, prev_commit)
@@ -363,6 +367,7 @@ module Benchmark = struct
 end
 
 module Hash = Irmin.Hash.SHA1
+
 (* module Hash = Irmin.Hash.SHA256 *)
 
 module Bench_suite (Conf : sig
@@ -376,16 +381,59 @@ struct
    *     (Irmin.Branch.String)
    *     (Hash) *)
 
+
+
   module Store =
     Irmin_pack.Make (Conf) (Irmin.Metadata.None) (Irmin.Contents.String)
       (Irmin.Path.String_list)
       (Irmin.Branch.String)
       (Hash)
 
+  let _main () =
+    let conf = Irmin_pack.config ~readonly:false ~fresh:true "ici" in
+    let* repo = Store.Repo.v conf in
+    let tree =
+      Store.Tree.of_concrete
+        (`Tree [
+             (* The [foo] blob is the pre_hash of [bar] *)
+             ("bar", `Tree [("baz", `Contents ("toto", ()))]);
+             ("foo", `Contents ("\001\001\003baz\011\156&%\220!\239\005\246\173M\223G\197\242\003\131z\163,", ()));
+        ])
+    in
+    let* commit = Store.Commit.v repo ~info:(info ()) ~parents:[] tree in
+    let tree = Store.Commit.tree commit in
+    let* _ = Store.Tree.find tree [ "foo" ] in
+    let* _ = Store.Tree.find tree [ "bar"; "baz" ] in (* Will crash *)
+    Lwt.return_unit
+
+  let main () =
+    let conf = Irmin_pack.config ~readonly:false ~fresh:true "ici" in
+    let* repo = Store.Repo.v conf in
+    let tree =
+      Store.Tree.of_concrete
+        (`Tree [
+             (* The [foo] blob is the pre_hash of [bar] *)
+             ("bar", `Tree []);
+             ("foo", `Contents ("\000", ()));
+        ])
+    in
+    let* commit = Store.Commit.v repo ~info:(info ()) ~parents:[] tree in
+    let tree = Store.Commit.tree commit in
+    let* _ = Store.Tree.find tree [ "foo" ] in
+    let* _ = Store.Tree.find tree [ "bar"; "baz" ] in (* Will crash *)
+    Lwt.return_unit
+
+  let () = Lwt_main.run (main ())
+
+         ; exit 1
+
+
+
   let _ = (ignore Conf.entries, Conf.stable_hash)
 
   let init_commit repo =
     Store.Commit.v repo ~info:(info ()) ~parents:[] Store.Tree.empty
+
 
   module Trees = Generate_trees (Store)
   module Trees_trace = Generate_trees_from_trace (Store)
@@ -752,5 +800,7 @@ let main_term =
     $ results_dir)
 
 let () =
-  let info = Term.info "Benchmarks for tree operations" in
-  Term.exit @@ Term.eval (main_term, info)
+  (* let info = Term.info "Benchmarks for tree operations" in *)
+  ignore main_term
+
+(* Term.exit @@ Term.eval (main_term, info) *)

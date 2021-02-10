@@ -587,8 +587,7 @@ module Make (P : Private.S) = struct
     let hash k =
       let h = hash k (fun x -> x) in
 
-      if is_ref h then Printf.eprintf "$$ Hash match in Node.hash\n%!";
-
+      (* if is_ref h then Printf.eprintf "$$ Hash match in Node.hash\n%!"; *)
       h
 
     let value_of_hash t repo k =
@@ -924,9 +923,9 @@ module Make (P : Private.S) = struct
               of_value repo v StepMap.empty)
 
     let remove t step =
-    (* to_map t >>= function
-     * | Ok m -> update (of_map m) step Remove
-     * | Error (`Dangling_hash _) -> assert false *)
+      (* to_map t >>= function
+       * | Ok m -> update (of_map m) step Remove
+       * | Error (`Dangling_hash _) -> assert false *)
       update t step Remove
 
     let add t step v = update t step (Add v)
@@ -1305,24 +1304,24 @@ module Make (P : Private.S) = struct
     Printf.eprintf "> Export start %d\n%!" tot;
     let seen = Hashes.create 127 in
     let add_node n v () =
+      Printf.eprintf ">> Tree.export add_node\n%!";
       cnt.node_add <- cnt.node_add + 1;
 
       let+ k = P.Node.add node_t v in
       let k' = Node.hash n in
 
-      if is_ref k then
-        Printf.eprintf "$$ Hash match in Tree.export add_node\n%!";
+      Printf.eprintf "   %s %b\n%!" (Repr.to_string P.Node.Key.t k) (is_ref k);
 
       assert (equal_hash k k');
       Node.export ?clear repo n k
     in
     let add_contents c x () =
+      Printf.eprintf ">> Tree.export add_contents\n%!";
       cnt.contents_add <- cnt.contents_add + 1;
       let+ k = P.Contents.add contents_t x in
       let k' = Contents.hash c in
 
-      if is_ref k then
-        Printf.eprintf "$$ Hash match in Tree.export add_contents\n%!";
+      Printf.eprintf "   %s %b\n%!" (Repr.to_string P.Node.Key.t k) (is_ref k);
 
       assert (equal_hash k k');
       Contents.export ?clear repo c k
@@ -1332,39 +1331,42 @@ module Make (P : Private.S) = struct
     let rec add_to_todo : type a. _ -> (unit -> a Lwt.t) -> a Lwt.t =
      fun n k ->
       let h = Node.hash n in
-
-      if is_ref h then
-        Printf.eprintf "$$ Hash match in Tree.export at add_to_todo\n%!";
+      Printf.eprintf ">> Tree.export add_to_todo - %s\n%!"
+        (Repr.to_string P.Node.Key.t h);
 
       if Hashes.mem seen h then (
-        if is_ref h then Printf.eprintf "   in seen\n%!";
+        if true then
+          Printf.eprintf
+            "   -> we've alreay seen that hash during current export -> skip\n\
+             %!";
 
         k ())
       else (
         Hashes.add seen h ();
         match n.Node.v with
         | Node.Hash _ ->
-            if is_ref h then Printf.eprintf "   is hash\n%!";
+            if true then Printf.eprintf "   -> it is hash -> skip\n%!";
 
             Node.export ?clear repo n h;
             k ()
         | Node.Value (_, x, None) ->
-            if is_ref h then Printf.eprintf "   is vanilla value\n%!";
+            if true then
+              Printf.eprintf "   -> it is an unaltered value -> skip\n%!";
             Stack.push (add_node n x) todo;
             k ()
-         | Map _ | Value (_, _, Some _) -> (
+        | Map _ | Value (_, _, Some _) -> (
             cnt.node_mem <- cnt.node_mem + 1;
             P.Node.mem node_t h >>= function
             | true ->
-                (if is_ref h then (
-                 Printf.eprintf "   is map|updated value - known\n%!";
+                (if true then (
+                 Printf.eprintf
+                   "   -> it is a Map or updated Value but known -> clean+skip\n%!";
 
                  if tot = 176 then (
                    let+ l = entries Path.empty n in
                    Printf.eprintf "==============\n%!";
 
                    Printf.eprintf "%d \n%!" (List.length l);
-
 
                    Printf.eprintf "==============\n%!")
                  else Lwt.return_unit)
@@ -1375,20 +1377,20 @@ module Make (P : Private.S) = struct
             | false -> (
                 match n.v with
                 | Hash _ | Value (_, _, None) ->
-                    if is_ref h then
+                    if true then
                       Printf.eprintf
                         "   is map|updated value - unknown - but known\n%!";
                     (* might happen if the node has already been added
                        (while the thread was block on P.Node.mem *)
                     k ()
                 | Map children ->
-                    if is_ref h then
+                    if true then
                       Printf.eprintf
-                        "   is map|updated value - unknown - map\n%!";
+                        "   -> it is a Map -> add self+children to todo\n%!";
                     let l = StepMap.bindings children |> List.map snd in
                     add_steps_to_todo l n k
                 | Value (_, _, Some children) ->
-                    if is_ref h then
+                    if true then
                       Printf.eprintf
                         "   is map|updated value - unknown - value\n%!";
                     let l =

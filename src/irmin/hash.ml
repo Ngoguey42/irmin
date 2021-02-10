@@ -63,7 +63,26 @@ module Typed (K : S) (V : Type.S) = struct
 
   type value = V.t
 
-  let pre_hash = Type.unstage (Type.pre_hash V.t)
+  let pre_hash : value -> (string -> unit) -> unit =
+    let f = Type.unstage (Type.pre_hash V.t) in
+    fun v g ->
+      let s = ref "" in
+      let h u =
+        s := !s ^ u;
+        g u
+      in
+      f v h;
+      let s = !s in
+      let len = String.length s in
+      let s =
+        String.to_seq s
+        |> Seq.map Char.escaped
+        |> List.of_seq
+        |> String.concat ""
+      in
+      Printf.eprintf "| Hash.Typed.pre_hash: len:%d %s\n%!" len s;
+      ()
+
   let hash v = K.hash (pre_hash v)
 end
 

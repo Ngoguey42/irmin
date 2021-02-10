@@ -250,10 +250,9 @@ struct
       Repr.to_string H.t h = "5ba93c9db0cff93f52b521d7420e43f6eda2784f"
 
     let unsafe_append ~ensure_unique ~overcommit t k v =
-      if is_ref k then (
-        Printf.eprintf "$$ Hash match from Pack.unsafe_append\n%!";
-      );
 
+      Printf.eprintf "   Pack.unsafe_append - %s - %b - len:%d\n     <%s>\n%!"
+        (Repr.to_string H.t k) (is_ref k) (Repr.to_string V.t v |> String.length) (Repr.to_string V.t v);
 
       if ensure_unique && unsafe_mem t k then ()
       else (
