@@ -246,7 +246,15 @@ struct
 
     let auto_flush = 1024
 
+    let is_ref h =
+      Repr.to_string H.t h = "5ba93c9db0cff93f52b521d7420e43f6eda2784f"
+
     let unsafe_append ~ensure_unique ~overcommit t k v =
+      if is_ref k then (
+        Printf.eprintf "$$ Hash match from Pack.unsafe_append\n%!";
+      );
+
+
       if ensure_unique && unsafe_mem t k then ()
       else (
         Log.debug (fun l -> l "[pack] append %a" pp_hash k);

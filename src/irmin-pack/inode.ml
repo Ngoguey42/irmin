@@ -551,11 +551,13 @@ struct
     let rec remove ~depth ~find t s k =
       match t.v with
       | Values vs ->
+         Printf.eprintf "     remove from map\n%!";
           let t = values (StepMap.remove s vs) in
           k t
       | Tree t -> (
           let len = t.length - 1 in
-          if len <= Conf.entries then
+          if len <= Conf.entries then (
+            Printf.eprintf "     remove and collapse tree\n%!";
             let vs =
               list_tree ~offset:0 ~length:t.length ~find (empty_acc t.length) t
             in
@@ -563,7 +565,7 @@ struct
             let vs = StepMap.of_list vs in
             let vs = StepMap.remove s vs in
             let t = values vs in
-            k t
+            k t)
           else
             let entries = Array.copy t.entries in
             let i = index ~depth s in
@@ -572,14 +574,16 @@ struct
             | Some t ->
                 let t = get_target ~find t in
                 if length t = 1 then (
+                  Printf.eprintf "     remove sieve subtree\n%!";
                   entries.(i) <- None;
                   let t = tree { depth; length = len; entries } in
                   k t)
-                else
+                else (
+                  Printf.eprintf "     remove and update subtree\n%!";
                   remove ~depth:(depth + 1) ~find t s @@ fun target ->
                   entries.(i) <- entry ~target (lazy (hash target));
                   let t = tree { depth; length = len; entries } in
-                  k t)
+                  k t))
 
     let remove ~find t s =
       (* XXX: [find_value ~depth:42] should break the unit tests. It doesn't. *)
@@ -705,7 +709,15 @@ struct
     exception Exit of [ `Msg of string ]
 
     let decode_bin_with_offset ~dict ~hash t off : int * t =
-      let off, i = decode_compress t off in
+      let off, i =
+        try
+          decode_compress t off
+        with exn ->
+          let bt = Printexc.get_raw_backtrace () in
+          Printf.eprintf "// Fail of Elt.decode_bin t:<%s> len of t:<%d> off:%d\n%!" t
+            (String.length t) off;
+          Printexc.raise_with_backtrace exn bt
+      in
       let step : Compress.name -> T.step = function
         | Direct n -> n
         | Indirect s -> (
@@ -777,10 +789,6 @@ struct
       let v = I.add ~find:t.find t.v s v in
       if v == t.v then t else { t with v }
 
-    let remove t s =
-      let v = I.remove ~find:t.find t.v s in
-      if v == t.v then t else { t with v }
-
     let pre_hash_i = Irmin.Type.(unstage (pre_hash I.t))
     let pre_hash_node = Irmin.Type.(unstage (pre_hash Node.t))
 
@@ -821,6 +829,13 @@ struct
         if I.is_tree t.v then check t else false
       in
       check_stable t && not (contains_empty_map_non_root t)
+
+    let remove t s =
+      Printf.eprintf "  Inode.Val.Remove\n%!";
+      let v = I.remove ~find:t.find t.v s in
+      let t = if v == t.v then t else { t with v } in
+      assert (integrity_check t);
+      t
   end
 end
 

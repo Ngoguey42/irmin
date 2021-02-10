@@ -72,6 +72,9 @@ let alist_iter2_lwt compare_k f l1 l2 =
   Lwt_list.iter_s (fun b -> b >>= fun () -> Lwt.return_unit) (List.rev !l3)
 
 module Make (P : Private.S) = struct
+  let is_ref h =
+    Repr.to_string P.Node.Key.t h = "5ba93c9db0cff93f52b521d7420e43f6eda2784f"
+
   type counters = {
     mutable contents_hash : int;
     mutable contents_find : int;
@@ -574,11 +577,19 @@ module Make (P : Private.S) = struct
             k acc
         | (k, Add e) :: rest ->
             value_of_elt e (fun e -> aux (P.Node.Val.add acc k e) rest)
-        | (k, Remove) :: rest -> aux (P.Node.Val.remove acc k) rest
+        | (k, Remove) :: rest ->
+            Format.printf "Node.value_of_updates on step %a\n%!"
+              (Repr.pp Path.step_t) k;
+            aux (P.Node.Val.remove acc k) rest
       in
       aux v updates
 
-    let hash k = hash k (fun x -> x)
+    let hash k =
+      let h = hash k (fun x -> x) in
+
+      if is_ref h then Printf.eprintf "$$ Hash match in Node.hash\n%!";
+
+      h
 
     let value_of_hash t repo k =
       match t.info.value with
@@ -710,7 +721,8 @@ module Make (P : Private.S) = struct
         | Value (repo, v, Some um) -> (
             match StepMap.find_opt step um with
             | Some (Add v) -> Lwt.return (Some v)
-            | None | Some Remove -> Lwt.return (of_value repo v))
+            | Some Remove -> Lwt.return_none
+            | None -> Lwt.return (of_value repo v))
         | Hash (repo, h) -> (
             match cached_value t with
             | Some v -> Lwt.return (of_value repo v)
@@ -728,6 +740,22 @@ module Make (P : Private.S) = struct
               match of_map m with
               | None -> of_t ()
               | Some _ as r -> Lwt.return r))
+
+    let findv t step =
+      Lwt.catch
+        (fun () -> findv t step)
+        (fun _exn ->
+          let bt = Printexc.get_raw_backtrace () in
+
+          let s =
+            match t.v with
+            | Hash (_, h) -> Repr.to_string P.Node.Key.t h
+            | _ -> "??"
+          in
+          Format.printf
+            "// Fail of Node.findv on step %a. Parent dir has hash %s\n%!"
+            (Repr.pp Path.step_t) step s;
+          Printexc.raise_with_backtrace _exn bt)
 
     let list_of_map ?(offset = 0) ?length m : (step * elt) list =
       let take_length seq =
@@ -895,7 +923,12 @@ module Make (P : Private.S) = struct
               in
               of_value repo v StepMap.empty)
 
-    let remove t step = update t step Remove
+    let remove t step =
+    (* to_map t >>= function
+     * | Ok m -> update (of_map m) step Remove
+     * | Error (`Dangling_hash _) -> assert false *)
+      update t step Remove
+
     let add t step v = update t step (Add v)
 
     let rec merge : type a. (t Merge.t -> a) -> a =
@@ -1219,7 +1252,8 @@ module Make (P : Private.S) = struct
     update_tree t k (fun _ -> Lwt.return_some v)
 
   let remove t k =
-    Log.debug (fun l -> l "Tree.remove %a" pp_path k);
+    (* Format.printf "Tree.remove %a\n%!" pp_path k; *)
+    (* Log.app (fun l -> l "Tree.remove %a" pp_path k); *)
     update_tree t k (fun _ -> Lwt.return_none)
 
   let update_tree t k f =
@@ -1242,13 +1276,43 @@ module Make (P : Private.S) = struct
     | `Contents (k, m) -> `Contents (Contents.of_hash repo k, m)
 
   let value_of_map t map = Node.value_of_map t map (fun x -> x)
+  let tot = ref 0
+
+  let entries path tree =
+    let rec aux acc = function
+      | [] -> Lwt.return acc
+      | (path, h) :: todo ->
+          let* childs = Node.bindings h >|= get_ok in
+          let acc, todo =
+            List.fold_left
+              (fun (acc, todo) (k, v) ->
+                let path = Path.rcons path k in
+                match v with
+                | `Node v -> (acc, (path, v) :: todo)
+                | `Contents c -> ((path, c) :: acc, todo))
+              (acc, todo) childs
+          in
+          (aux [@tailcall]) acc todo
+    in
+    (aux [@tailcall]) [] [ (path, tree) ]
 
   let export ?clear repo contents_t node_t n =
+    let tot =
+      let n = !tot in
+      incr tot;
+      n
+    in
+    Printf.eprintf "> Export start %d\n%!" tot;
     let seen = Hashes.create 127 in
     let add_node n v () =
       cnt.node_add <- cnt.node_add + 1;
+
       let+ k = P.Node.add node_t v in
       let k' = Node.hash n in
+
+      if is_ref k then
+        Printf.eprintf "$$ Hash match in Tree.export add_node\n%!";
+
       assert (equal_hash k k');
       Node.export ?clear repo n k
     in
@@ -1256,6 +1320,10 @@ module Make (P : Private.S) = struct
       cnt.contents_add <- cnt.contents_add + 1;
       let+ k = P.Contents.add contents_t x in
       let k' = Contents.hash c in
+
+      if is_ref k then
+        Printf.eprintf "$$ Hash match in Tree.export add_contents\n%!";
+
       assert (equal_hash k k');
       Contents.export ?clear repo c k
     in
@@ -1264,32 +1332,65 @@ module Make (P : Private.S) = struct
     let rec add_to_todo : type a. _ -> (unit -> a Lwt.t) -> a Lwt.t =
      fun n k ->
       let h = Node.hash n in
-      if Hashes.mem seen h then k ()
+
+      if is_ref h then
+        Printf.eprintf "$$ Hash match in Tree.export at add_to_todo\n%!";
+
+      if Hashes.mem seen h then (
+        if is_ref h then Printf.eprintf "   in seen\n%!";
+
+        k ())
       else (
         Hashes.add seen h ();
         match n.Node.v with
         | Node.Hash _ ->
+            if is_ref h then Printf.eprintf "   is hash\n%!";
+
             Node.export ?clear repo n h;
             k ()
         | Node.Value (_, x, None) ->
+            if is_ref h then Printf.eprintf "   is vanilla value\n%!";
             Stack.push (add_node n x) todo;
             k ()
-        | Map _ | Value (_, _, Some _) -> (
+         | Map _ | Value (_, _, Some _) -> (
             cnt.node_mem <- cnt.node_mem + 1;
             P.Node.mem node_t h >>= function
             | true ->
+                (if is_ref h then (
+                 Printf.eprintf "   is map|updated value - known\n%!";
+
+                 if tot = 176 then (
+                   let+ l = entries Path.empty n in
+                   Printf.eprintf "==============\n%!";
+
+                   Printf.eprintf "%d \n%!" (List.length l);
+
+
+                   Printf.eprintf "==============\n%!")
+                 else Lwt.return_unit)
+                else Lwt.return_unit)
+                >>= fun () ->
                 Node.export ?clear repo n h;
                 k ()
             | false -> (
                 match n.v with
                 | Hash _ | Value (_, _, None) ->
+                    if is_ref h then
+                      Printf.eprintf
+                        "   is map|updated value - unknown - but known\n%!";
                     (* might happen if the node has already been added
                        (while the thread was block on P.Node.mem *)
                     k ()
                 | Map children ->
+                    if is_ref h then
+                      Printf.eprintf
+                        "   is map|updated value - unknown - map\n%!";
                     let l = StepMap.bindings children |> List.map snd in
                     add_steps_to_todo l n k
                 | Value (_, _, Some children) ->
+                    if is_ref h then
+                      Printf.eprintf
+                        "   is map|updated value - unknown - value\n%!";
                     let l =
                       StepMap.bindings children
                       |> List.filter_map (function
@@ -1351,6 +1452,7 @@ module Make (P : Private.S) = struct
     loop () >|= fun () ->
     let x = Node.hash n in
     Log.debug (fun l -> l "Tree.export -> %a" pp_hash x);
+    Printf.eprintf "> Export end %d\n%!" tot;
     x
 
   let merge : t Merge.t =
@@ -1360,24 +1462,6 @@ module Make (P : Private.S) = struct
       | Error e -> Lwt.return (Error e)
     in
     Merge.v tree_t f
-
-  let entries path tree =
-    let rec aux acc = function
-      | [] -> Lwt.return acc
-      | (path, h) :: todo ->
-          let* childs = Node.bindings h >|= get_ok in
-          let acc, todo =
-            List.fold_left
-              (fun (acc, todo) (k, v) ->
-                let path = Path.rcons path k in
-                match v with
-                | `Node v -> (acc, (path, v) :: todo)
-                | `Contents c -> ((path, c) :: acc, todo))
-              (acc, todo) childs
-          in
-          (aux [@tailcall]) acc todo
-    in
-    (aux [@tailcall]) [] [ (path, tree) ]
 
   (** Given two forced lazy values, return an empty diff if they both use the
       same dangling hash. *)

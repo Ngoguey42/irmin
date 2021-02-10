@@ -159,14 +159,16 @@ struct
       Hashtbl.to_seq histo_per_op
       |> Seq.map snd
       |> Seq.map (fun histo ->
-             Bentov.mean histo *. float_of_int (Bentov.total_count histo))
+             let count = Bentov.total_count histo in
+             if count = 0 then 0. else
+               Bentov.mean histo *. float_of_int count)
       |> Seq.fold_left ( +. ) 0.
     in
     let total = if total = 0. then 1. else total in
     let pp_stat ppf which =
       let histo = Hashtbl.find histo_per_op which in
       let n = Bentov.total_count histo in
-      let el = Bentov.mean histo *. float_of_int n in
+      let el = if n = 0 then 0. else Bentov.mean histo *. float_of_int n in
       if as_json then
         let pp_bar ppf (bin : Bentov.bin) =
           Format.fprintf ppf "[%2d,%.3e]" bin.count bin.center
@@ -206,28 +208,66 @@ struct
       Fmt.(list ~sep:comma string)
       k b
 
+  let contains s1 s2 =
+    try
+      let len = String.length s2 in
+      for i = 0 to String.length s1 - len do
+        if String.sub s1 i len = s2 then raise Exit
+      done;
+      false
+    with Exit -> true
+
+  let trg key =
+    (* String.concat "/" key *)
+    (* = "data/contracts/index/ed25519/08/c7/d3/b6/28/f0ffb8852a3cad440b0531bfc68411/balance" *)
+    contains (String.concat "/" key)
+      "08/c7/d3/b6/28/f0ffb8852a3cad440b0531bfc68411"
+
   let exec_add t prev_commit i key v () =
+    (* Printf.eprintf "?? exec_add k:</%s> v:<%s>(len%d) %d \n%!"
+     *   (String.concat "/" key) v (String.length v) (String.get v 0 |> Char.code)
+     * ; *)
+    if trg key then Printf.eprintf "| exec_add  with %s\n%!" (String.concat "/" key);
+    let v = if trg key then "Salut" else v in
     let+ tree = Store.Tree.add t.tree key v in
     t.tree <- tree;
     (i + 1, prev_commit)
 
   let exec_remove t prev_commit i keys () =
+    if trg keys then Printf.eprintf "| exec_remo with %s\n%!" (String.concat "/" keys);
     let+ tree = Store.Tree.remove t.tree keys in
     t.tree <- tree;
     (i + 1, prev_commit)
 
   let exec_find t prev_commit n i keys b () =
-    Store.Tree.find t.tree keys >|= function
-    | None when not b -> (i + 1, prev_commit)
-    | Some _ when b -> (i + 1, prev_commit)
-    | _ -> error_find "find" keys b i n
+    if trg keys then Printf.eprintf "| exec_find with %s\n%!" (String.concat "/" keys);
+    let res () =
+      Store.Tree.find t.tree keys >|= fun res ->
+      (* (if trg keys then
+       *  match res with
+       *  | None -> Printf.eprintf "exec_find: got None!\n%!"
+       *  | Some s -> Printf.eprintf "exec_find: got Some %s!\n%!" s); *)
+      match res with
+      | None when not b -> (i + 1, prev_commit)
+      | Some _ when b -> (i + 1, prev_commit)
+      | _ -> error_find "find" keys b i n
+    in
+    Lwt.catch res (fun _exn ->
+        let bt = Printexc.get_raw_backtrace () in
+        Printf.eprintf "// Fail of exec find %s\n%!" (String.concat "/" keys);
+        Printexc.raise_with_backtrace _exn bt
+        (* raise _exn *))
+
+  (* res *)
 
   let exec_mem t prev_commit n i keys b () =
+    if trg keys then Printf.eprintf "| exec_mem  with %s\n%!" (String.concat "/" keys);
     let+ b' = Store.Tree.mem t.tree keys in
     if b <> b' then error_find "mem" keys b i n;
     (i + 1, prev_commit)
 
   let exec_mem_tree t prev_commit n i keys b () =
+    if trg keys then Printf.eprintf "| exec_mete with %s\n%!" (String.concat "/" keys);
     let+ b' = Store.Tree.mem_tree t.tree keys in
     if b <> b' then error_find "mem_tree" keys b i n;
     (i + 1, prev_commit)
@@ -281,7 +321,7 @@ struct
 
   let add_commits repo commits () =
     with_progress_bar ~message:"Replaying trace" ~n:(Array.length commits)
-      ~unit:"commits" ~sampling_interval:50
+      ~unit:"commits" ~sampling_interval:500
     @@ fun prog ->
     let t = { tree = Store.Tree.empty } in
     let rec array_iter_lwt prev_commit i =
@@ -323,17 +363,26 @@ module Benchmark = struct
 end
 
 module Hash = Irmin.Hash.SHA1
+(* module Hash = Irmin.Hash.SHA256 *)
 
 module Bench_suite (Conf : sig
   val entries : int
   val stable_hash : int
 end) =
 struct
+  (* module Store =
+   *   Irmin_mem.Make (Irmin.Metadata.None) (Irmin.Contents.String)
+   *     (Irmin.Path.String_list)
+   *     (Irmin.Branch.String)
+   *     (Hash) *)
+
   module Store =
     Irmin_pack.Make (Conf) (Irmin.Metadata.None) (Irmin.Contents.String)
       (Irmin.Path.String_list)
       (Irmin.Branch.String)
       (Hash)
+
+  let _ = (ignore Conf.entries, Conf.stable_hash)
 
   let init_commit repo =
     Store.Commit.v repo ~info:(info ()) ~parents:[] Store.Tree.empty
