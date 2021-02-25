@@ -70,20 +70,22 @@ module Unix : S = struct
 
   let unsafe_flush t =
     Log.debug (fun l -> l "IO flush %s" t.file);
-    let buf = Buffer.contents t.buf in
-    if buf = "" then ()
-    else
+    if not (Buffer.is_empty t.buf) then (
+      let buf = Buffer.unsafe_bytes t.buf in
+      let buf_len = Buffer.length t.buf in
       let offset = t.offset in
       Buffer.clear t.buf;
-      Raw.unsafe_write t.raw ~off:t.flushed buf;
+      Raw.unsafe_write t.raw ~off:t.flushed
+        (Bytes.unsafe_to_string buf)
+        0 buf_len;
       Raw.Offset.set t.raw offset;
       (* concurrent append might happen so here t.offset might differ
          from offset *)
       let h = header t.version in
-      if not (t.flushed ++ Int64.of_int (String.length buf) = h ++ offset) then
+      if not (t.flushed ++ Int64.of_int buf_len = h ++ offset) then
         Fmt.failwith "sync error: %s flushed=%Ld offset+header=%Ld\n%!" t.file
           t.flushed (offset ++ h);
-      t.flushed <- offset ++ h
+      t.flushed <- offset ++ h)
 
   let flush t =
     if t.readonly then raise RO_Not_Allowed;
@@ -100,7 +102,9 @@ module Unix : S = struct
   let set t ~off buf =
     if t.readonly then raise RO_Not_Allowed;
     unsafe_flush t;
-    Raw.unsafe_write t.raw ~off:(header t.version ++ off) buf;
+    Raw.unsafe_write t.raw
+      ~off:(header t.version ++ off)
+      buf 0 (String.length buf);
     assert (
       let len = Int64.of_int (String.length buf) in
       let off = header t.version ++ off ++ len in
@@ -281,7 +285,9 @@ module Unix : S = struct
           assert (read <= buf_len);
           let to_write = if read < buf_len then Bytes.sub buf 0 read else buf in
           let () =
-            Raw.unsafe_write dst ~off:dst_off (Bytes.unsafe_to_string to_write)
+            Raw.unsafe_write dst ~off:dst_off
+              (Bytes.unsafe_to_string to_write)
+              0 (Bytes.length to_write)
           in
           progress (Int64.of_int read);
           (inner [@tailcall]) ~src_off:(src_off + read) ~dst_off:(dst_off + read)
