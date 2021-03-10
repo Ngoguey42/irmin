@@ -1,5 +1,9 @@
-let ( let* ) x f = Lwt.bind x f
-let ( let+ ) x f = Lwt.map f x
+(* open Irmin.Export_for_backends *)
+
+(* open Lwt.Infix *)
+let ( let+ ) = Lwt.( >|= )
+let ( let* ) = Lwt.( >>= )
+
 
 let reporter ?(prefix = "") () =
   let report src level ~over k msgf =
@@ -50,7 +54,7 @@ let with_timer f =
   let t1 = Sys.time () -. t0 in
   (t1, a)
 
-let with_progress_bar ~message ~n ~unit ~sampling_interval =
+let with_progress_bar ~message ~n ~unit =
   let bar =
     let w =
       if n = 0 then 1
@@ -59,7 +63,7 @@ let with_progress_bar ~message ~n ~unit ~sampling_interval =
     let pp fmt i = Format.fprintf fmt "%*Ld/%*d %s" w i w n unit in
     let pp f = f ~width:(w + 1 + w + 1 + String.length unit) pp in
     Progress_unix.counter ~mode:`ASCII ~width:79 ~total:(Int64.of_int n)
-      ~sampling_interval ~message ~pp ()
+      ~message ~pp ()
   in
   Progress_unix.with_reporters bar
 
@@ -101,7 +105,7 @@ module FSHelper = struct
   let rm_dir root =
     if Sys.file_exists root then (
       let cmd = Printf.sprintf "rm -rf %s" root in
-      Logs.info (fun l -> l "exec: %s\n%!" cmd);
+      Logs.info (fun l -> l "exec: %s" cmd);
       let _ = Sys.command cmd in
       ())
 end
