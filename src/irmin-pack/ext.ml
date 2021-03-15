@@ -182,35 +182,41 @@ struct
               (* backpatching to add pack flush before an index flush *)
             ~fresh ~readonly ~throttle ~log_size (Filename.concat root "contents")
         in
+        let* contents = Contents.CA.v ~fresh ~readonly ~lru_size ~index:index_contents (Filename.concat root "contents") in
+        (f := fun () ->
+              Contents.CA.flush ~index:false contents;
+        );
+
+
         let index_node =
           Index.v
             ~flush_callback:(fun () -> !f ())
               (* backpatching to add pack flush before an index flush *)
             ~fresh ~readonly ~throttle ~log_size (Filename.concat root "nodes")
         in
+        let* node = Node.CA.v ~fresh ~readonly ~lru_size ~index:index_node (Filename.concat root "nodes") in
+        (f := fun () ->
+              Node.CA.flush ~index:false node;
+        );
+
+
         let index_commit =
           Index.v
             ~flush_callback:(fun () -> !f ())
               (* backpatching to add pack flush before an index flush *)
             ~fresh ~readonly ~throttle ~log_size (Filename.concat root "commits")
         in
-        let* contents = Contents.CA.v ~fresh ~readonly ~lru_size ~index:index_contents (Filename.concat root "contents") in
-        let* node = Node.CA.v ~fresh ~readonly ~lru_size ~index:index_node (Filename.concat root "nodes") in
         let* commit = Commit.CA.v ~fresh ~readonly ~lru_size ~index:index_commit (Filename.concat root "commits") in
+        (f := fun () ->
+              Commit.CA.flush ~index:false commit;
+        );
+
+
         let+ branch = Branch.v ~fresh ~readonly root in
         (* Stores share instances in memory, one flush is enough. In case of a
            system crash, the flush_callback might not make with the disk. In
            this case, when the store is reopened, [integrity_check] needs to be
            called to repair the store. *)
-        (f := fun () ->
-              (* Pack_blob.flush ~index:false contents; *)
-              Contents.CA.flush ~index:false contents;
-              Node.CA.flush ~index:false node;
-              Commit.CA.flush ~index:false commit;
-              (* Index.flush index_contents; *)
-              (* Index.flush index_node; *)
-              (* Index.flush index_commit *)
-        );
         { contents; node; commit; branch; config; index_contents; index_node; index_commit }
 
       let close t =
