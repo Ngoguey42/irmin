@@ -1228,6 +1228,7 @@ struct
   let sync = Pack.sync
   let clear = Pack.clear
   let clear_caches = Pack.clear_caches
+  let flush = Pack.flush
 
   let decode_bin ~dict ~hash buff off =
     Inter.decode_bin ~dict ~hash buff off |> fst

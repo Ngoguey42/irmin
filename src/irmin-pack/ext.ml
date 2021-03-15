@@ -53,7 +53,9 @@ module Make
     (Commit : Irmin.Private.Commit.S with type hash = H.t) =
 struct
   module Index = Pack_index.Make (H)
-  module Pack = Pack.File (Index) (H) (IO_version)
+  module Pack_blob = Pack.File (Index) (H) (IO_version)
+  module Pack_node = Pack.File (Index) (H) (IO_version)
+  module Pack_commit = Pack.File (Index) (H) (IO_version)
   module Dict = Pack_dict.Make (IO_version)
 
   let current_version = IO_version.io_version
@@ -68,7 +70,7 @@ struct
         module Key = H
         module Val = C
 
-        module CA_Pack = Pack.Make (struct
+        module CA_Pack = Pack_blob.Make (struct
           include Val
           module H = Irmin.Hash.Typed (H) (Val)
 
@@ -95,7 +97,7 @@ struct
     end
 
     module Node = struct
-      module CA = Inode.Make (Config) (H) (Pack) (Node)
+      module CA = Inode.Make (Config) (H) (Pack_node) (Node)
       include Irmin.Private.Node.Store (Contents) (P) (M) (CA)
     end
 
@@ -104,7 +106,7 @@ struct
         module Key = H
         module Val = Commit
 
-        module CA_Pack = Pack.Make (struct
+        module CA_Pack = Pack_commit.Make (struct
           include Val
           module H = Irmin.Hash.Typed (H) (Val)
 
@@ -192,15 +194,23 @@ struct
               (* backpatching to add pack flush before an index flush *)
             ~fresh ~readonly ~throttle ~log_size (Filename.concat root "commits")
         in
-        let* contents = Contents.CA.v ~fresh ~readonly ~lru_size ~index:index_contents root in
-        let* node = Node.CA.v ~fresh ~readonly ~lru_size ~index:index_node root in
-        let* commit = Commit.CA.v ~fresh ~readonly ~lru_size ~index:index_commit root in
+        let* contents = Contents.CA.v ~fresh ~readonly ~lru_size ~index:index_contents (Filename.concat root "contents") in
+        let* node = Node.CA.v ~fresh ~readonly ~lru_size ~index:index_node (Filename.concat root "nodes") in
+        let* commit = Commit.CA.v ~fresh ~readonly ~lru_size ~index:index_commit (Filename.concat root "commits") in
         let+ branch = Branch.v ~fresh ~readonly root in
         (* Stores share instances in memory, one flush is enough. In case of a
            system crash, the flush_callback might not make with the disk. In
            this case, when the store is reopened, [integrity_check] needs to be
            called to repair the store. *)
-        (f := fun () -> Contents.CA.flush ~index:false contents);
+        (f := fun () ->
+              (* Pack_blob.flush ~index:false contents; *)
+              Contents.CA.flush ~index:false contents;
+              Node.CA.flush node;
+              Commit.CA.flush ~index:false commit;
+              (* Index.flush index_contents; *)
+              (* Index.flush index_node; *)
+              (* Index.flush index_commit *)
+        );
         { contents; node; commit; branch; config; index_contents; index_node; index_commit }
 
       let close t =

@@ -42,6 +42,8 @@ module type S = sig
   include S.CHECKABLE with type 'a t := 'a t and type key := key
   include CLOSEABLE with type 'a t := 'a t
 
+  val flush :  ?index:bool -> ?index_merge:bool -> 'a t -> unit
+
   val sync : ?on_generation_change:(unit -> unit) -> 'a t -> unit
   val clear_caches : 'a t -> unit
 
