@@ -205,7 +205,7 @@ struct
         (f := fun () ->
               (* Pack_blob.flush ~index:false contents; *)
               Contents.CA.flush ~index:false contents;
-              Node.CA.flush node;
+              Node.CA.flush ~index:false node;
               Commit.CA.flush ~index:false commit;
               (* Index.flush index_contents; *)
               (* Index.flush index_node; *)
