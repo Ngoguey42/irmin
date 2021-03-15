@@ -147,7 +147,9 @@ struct
         node : read Node.CA.t;
         commit : read Commit.CA.t;
         branch : Branch.t;
-        index : Index.t;
+        index_contents : Index.t;
+        index_node : Index.t;
+        index_commit : Index.t;
       }
 
       let contents_t t : 'a Contents.t = t.contents
@@ -172,25 +174,39 @@ struct
         let log_size = Pack_config.index_log_size config in
         let throttle = Pack_config.merge_throttle config in
         let f = ref (fun () -> ()) in
-        let index =
+        let index_contents =
           Index.v
             ~flush_callback:(fun () -> !f ())
               (* backpatching to add pack flush before an index flush *)
-            ~fresh ~readonly ~throttle ~log_size root
+            ~fresh ~readonly ~throttle ~log_size (Filename.concat root "contents")
         in
-        let* contents = Contents.CA.v ~fresh ~readonly ~lru_size ~index root in
-        let* node = Node.CA.v ~fresh ~readonly ~lru_size ~index root in
-        let* commit = Commit.CA.v ~fresh ~readonly ~lru_size ~index root in
+        let index_node =
+          Index.v
+            ~flush_callback:(fun () -> !f ())
+              (* backpatching to add pack flush before an index flush *)
+            ~fresh ~readonly ~throttle ~log_size (Filename.concat root "nodes")
+        in
+        let index_commit =
+          Index.v
+            ~flush_callback:(fun () -> !f ())
+              (* backpatching to add pack flush before an index flush *)
+            ~fresh ~readonly ~throttle ~log_size (Filename.concat root "commits")
+        in
+        let* contents = Contents.CA.v ~fresh ~readonly ~lru_size ~index:index_contents root in
+        let* node = Node.CA.v ~fresh ~readonly ~lru_size ~index:index_node root in
+        let* commit = Commit.CA.v ~fresh ~readonly ~lru_size ~index:index_commit root in
         let+ branch = Branch.v ~fresh ~readonly root in
         (* Stores share instances in memory, one flush is enough. In case of a
            system crash, the flush_callback might not make with the disk. In
            this case, when the store is reopened, [integrity_check] needs to be
            called to repair the store. *)
         (f := fun () -> Contents.CA.flush ~index:false contents);
-        { contents; node; commit; branch; config; index }
+        { contents; node; commit; branch; config; index_contents; index_node; index_commit }
 
       let close t =
-        Index.close t.index;
+        Index.close t.index_contents;
+        Index.close t.index_node;
+        Index.close t.index_commit;
         Contents.CA.close (contents_t t) >>= fun () ->
         Node.CA.close (snd (node_t t)) >>= fun () ->
         Commit.CA.close (snd (commit_t t)) >>= fun () -> Branch.close t.branch
@@ -336,7 +352,7 @@ struct
       | `Node -> X.Node.CA.integrity_check ~offset ~length k nodes
       | `Commit -> X.Commit.CA.integrity_check ~offset ~length k commits
     in
-    Checks.integrity_check ?ppf ~auto_repair ~check t.index
+    Checks.integrity_check ?ppf ~auto_repair ~check t.index_commit
 
   include Irmin.Of_private (X)
 
