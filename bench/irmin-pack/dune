@@ -1,13 +1,3 @@
-(executables
- (names main layers)
- (public_names bench-pack bench-pack-layers)
- (modules main layers import)
- (package irmin-bench)
- (preprocess
-  (pps ppx_deriving_yojson ppx_repr))
- (libraries irmin-pack irmin-pack.layered irmin-test.bench irmin-layers lwt
-   unix cmdliner logs yojson ppx_deriving_yojson memtrace repr ppx_repr
-   bench_common))
 
 (library
  (name bench_common)
@@ -16,17 +6,11 @@
 
 ;; Require the above executables to compile during tests
 
-(rule
- (alias runtest)
- (package irmin-bench)
- (deps main.exe layers.exe tree.exe)
- (action (progn)))
-
 (executable
  (name tree)
  (modules tree)
  (preprocess
   (pps ppx_deriving_yojson ppx_repr))
- (libraries irmin-pack irmin-pack.layered irmin-test.bench irmin-layers lwt
+ (libraries irmin-pack irmin-pack.layered irmin-layers lwt
    unix cmdliner logs yojson ppx_deriving_yojson memtrace repr ppx_repr
    bench_common mtime mtime.clock.os bentov))
