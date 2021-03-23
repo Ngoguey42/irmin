@@ -878,8 +878,7 @@ module Bench_suite (Store : STORE) = struct
 end
 
 module Make_store_layered (Conf : sig
-  val max_leaf_size : int
-  val branching_factor : int
+  val entries : int
   val stable_hash : int
 end) =
 struct
@@ -900,7 +899,9 @@ struct
         if i = config.freeze_commit then
           let* c = Store.Commit.of_hash repo commit_hash in
           let c = Option.get c in
-          Store.freeze repo ~max_lower:[ c ]
+          ignore c;
+          Lwt.return_unit
+          (* Store.freeze repo ~max_lower:[ c ] *)
         else Lwt.return_unit
       in
       (* Something else than pause could be used here, like an Lwt_unix.sleep
@@ -919,8 +920,7 @@ struct
 end
 
 module Make_store_pack (Conf : sig
-  val max_leaf_size : int
-  val branching_factor : int
+  val entries : int
   val stable_hash : int
 end) =
 struct
@@ -952,9 +952,9 @@ end
 
 let store_of_config config =
   let max_leaf_size, branching_factor, stable_hash = config.inode_config in
+  assert (max_leaf_size = branching_factor);
   let module Conf = struct
-    let max_leaf_size = max_leaf_size
-    let branching_factor = branching_factor
+    let entries = max_leaf_size
     let stable_hash = stable_hash
   end in
   match config.store_type with
