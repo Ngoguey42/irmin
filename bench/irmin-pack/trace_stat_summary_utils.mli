@@ -3,6 +3,13 @@
     This file is NOT meant to be used from Tezos, as opposed to some other
     "trace_*" files. *)
 
+module Seq : sig
+  include module type of Stdlib.Seq
+
+  val mapi64 : 'a t -> (int64 * 'a) t
+  val take_up_to : is_last:('a -> bool) -> 'a t -> 'a t * 'a list
+end
+
 type histo = (float * int) list [@@deriving repr]
 type curve = float list [@@deriving repr]
 
@@ -48,8 +55,11 @@ val pp_percent : Format.formatter -> float -> unit
 
     Negative inputs are undefined. *)
 
-val approx_transaction_count_of_block_count : ?first_block_idx:int -> int -> int
-val approx_operation_count_of_block_count : ?first_block_idx:int -> int -> int
+type block_info = Tezos_history_metrics.block_info
+
+val operations_of_block_level : int -> block_info Lwt.t
+(** Retrieve some basic informations on a given {i tezos mainnet} block level by
+    querying the tezstats.com JSON API. *)
 
 (** Functional Exponential Moving Average (EMA). *)
 module Exponential_moving_average : sig
@@ -229,7 +239,9 @@ end
 
     {3 Stats Gathered}
 
-    - Global max, argmax, min, argmin and mean of the variable.
+    - Global (non-nan) max, argmax, min, argmin and mean of the variable.
+    - The very last non-nan sample encountered minus the very first non-nan
+      sample encountered.
     - Global histogram made of [distribution_bin_count] bins. Option:
       [distribution_scale] to control the spreading scale of the bins, either on
       a linear or a log scale. Computed using Bentov.
@@ -304,6 +316,7 @@ module Variable_summary : sig
     max_value : float * int;
     min_value : float * int;
     mean : float;
+    diff : float;
     distribution : histo;
     evolution : curve;
   }

@@ -176,7 +176,6 @@ module Make_stat (Store : Irmin.KV) = struct
 
   let flush { writer; _ } = Def.flush writer
   let close { writer; _ } = Def.close writer
-  let remove { writer; _ } = Def.remove writer
   let short_op_begin t = t.t0 <- Mtime_clock.counter ()
 
   let short_op_end { t0; writer; _ } short_op =

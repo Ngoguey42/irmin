@@ -16,6 +16,7 @@
 type config = {
   ncommits_trace : int;
   store_dir : string;
+  startup_store_type : [ `Fresh | `Copy_from of string ];
   path_conversion : [ `None | `V1 | `V0_and_v1 | `V0 ];
   inode_config : int * int;
   store_type : [ `Pack | `Pack_layered | `Pack_mem ];
@@ -30,13 +31,22 @@ type config = {
 module type Store = sig
   type store_config
 
-  include Irmin.KV with type contents = bytes
+  include
+    Irmin.KV
+      with type contents = bytes
+       and type metadata = unit
+       and type hash = Tezos_context_encoding.Context.Hash.t
 
-  type on_commit := int -> Hash.t -> unit Lwt.t
-  type on_end := unit -> unit Lwt.t
-  type pp := Format.formatter -> unit
+  val sync : repo -> unit
+  val clear : repo -> unit Lwt.t
+  val create_repo : readonly:bool -> string -> repo Lwt.t
 
-  val create_repo : store_config -> (Repo.t * on_commit * on_end * pp) Lwt.t
+  (* type on_commit := int -> Hash.t -> unit Lwt.t
+   * type on_end := unit -> unit Lwt.t
+   * type pp := Format.formatter -> unit *)
+
+  (* val create_repo' : store_config -> (Repo.t * on_commit * on_end * pp) Lwt.t *)
+
 end
 
 module type Sigs = sig

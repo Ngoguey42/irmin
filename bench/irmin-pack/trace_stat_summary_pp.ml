@@ -190,8 +190,10 @@ module Table1 = struct
          [~first_block_idx] *)
       List.map
         (fun s ->
-          (Utils.approx_transaction_count_of_block_count s.block_count
-          |> float_of_int)
+          (* TODO: FIXME *)
+          42.
+          (* (Utils.approx_transaction_count_of_block_count s.block_count *)
+          (* |> float_of_int) *)
           /. s.elapsed_cpu)
         summaries
     in
@@ -200,61 +202,53 @@ module Table1 = struct
          [~first_block_idx] *)
       List.map
         (fun s ->
-          (Utils.approx_operation_count_of_block_count s.block_count
-          |> float_of_int)
+          (* TODO: FIXME *)
+          42.
+          (* (Utils.approx_operation_count_of_block_count s.block_count *)
+          (* |> float_of_int) *)
           /. s.elapsed_cpu)
         summaries
     in
     let bytes =
-      List.map
-        (fun s -> fst s.index.bytes_both.value_after_commit.max_value)
-        summaries
+      List.map (fun s -> s.index.bytes_both.value_after_commit.diff) summaries
     in
     let read_bytes =
-      List.map
-        (fun s -> fst s.index.bytes_read.value_after_commit.max_value)
-        summaries
+      List.map (fun s -> s.index.bytes_read.value_after_commit.diff) summaries
     in
     let written_bytes =
       List.map
-        (fun s -> fst s.index.bytes_written.value_after_commit.max_value)
+        (fun s -> s.index.bytes_written.value_after_commit.diff)
         summaries
     in
     let throughput =
       List.map
-        (fun s ->
-          fst s.index.bytes_both.value_after_commit.max_value /. s.elapsed_cpu)
+        (fun s -> s.index.bytes_both.value_after_commit.diff /. s.elapsed_cpu)
         summaries
     in
     let read_throughput =
       List.map
-        (fun s ->
-          fst s.index.bytes_read.value_after_commit.max_value /. s.elapsed_cpu)
+        (fun s -> s.index.bytes_read.value_after_commit.diff /. s.elapsed_cpu)
         summaries
     in
     let write_throughput =
       List.map
         (fun s ->
-          fst s.index.bytes_written.value_after_commit.max_value
-          /. s.elapsed_cpu)
+          s.index.bytes_written.value_after_commit.diff /. s.elapsed_cpu)
         summaries
     in
     let iops =
       List.map
-        (fun s ->
-          fst s.index.nb_both.value_after_commit.max_value /. s.elapsed_cpu)
+        (fun s -> s.index.nb_both.value_after_commit.diff /. s.elapsed_cpu)
         summaries
     in
     let read_iops =
       List.map
-        (fun s ->
-          fst s.index.nb_reads.value_after_commit.max_value /. s.elapsed_cpu)
+        (fun s -> s.index.nb_reads.value_after_commit.diff /. s.elapsed_cpu)
         summaries
     in
     let write_iops =
       List.map
-        (fun s ->
-          fst s.index.nb_writes.value_after_commit.max_value /. s.elapsed_cpu)
+        (fun s -> s.index.nb_writes.value_after_commit.diff /. s.elapsed_cpu)
         summaries
     in
     let max_ram =
@@ -787,9 +781,12 @@ module Table4 = struct
                 /. float_of_int (s.curves_sample_count - 1)
                 *. float_of_int s.block_count)
             |> List.map (fun v ->
-                   Utils.approx_transaction_count_of_block_count
-                     (int_of_float v)
-                   |> float_of_int)
+                   (* TODO: FIXME *)
+                   ignore v;
+                   42.
+                   (* Utils.approx_transaction_count_of_block_count *)
+                   (* (int_of_float v) *)
+                   (* |> float_of_int *))
           in
           played_count_curve)
     in
@@ -803,8 +800,11 @@ module Table4 = struct
                 /. float_of_int (s.curves_sample_count - 1)
                 *. float_of_int s.block_count)
             |> List.map (fun v ->
-                   Utils.approx_operation_count_of_block_count (int_of_float v)
-                   |> float_of_int)
+                   (* TODO: FIXME *)
+                   ignore v;
+                   42.
+                   (* Utils.approx_operation_count_of_block_count (int_of_float v) *)
+                   (* |> float_of_int *))
           in
           played_count_curve)
     in

@@ -21,22 +21,288 @@
 
     {3 Traces Workflow}
 
-    A Tezos node (may) output a [Raw_replayable_trace] file. Such a trace should
-    be postprocessed to create a [Replayable_trace].
+    {v
+            (tezos-node) ------> {not yet implemented} ---------\
+                  |                                             |
+                  v                                             |
+          [raw actions trace] -> (manage_actions.exe summarise) |
+                  |                            |                |
+                  |                            v                |
+                  |                 [raw_actions_summary.json]  |
+                  |                            |                |
+                  |                            v                |
+                  |                   (pandas / matplotlib)     |
+                  v                                             |
+  (manage_actions.exe to-replayable)                            |
+                  |                                             |
+                  v                                             |
+       [replayable actions trace]                               |
+                  |                                             |
+                  v                                             v
+             (tree.exe) -----------------------------> [stat trace]
+                                                            |
+                                                            v
+                                               (manage_stats.exe summarise)
+                                                            |
+                                                            v
+                                                  [stat_summary.json]
+                                                            |
+                                                            v
+                                     (pandas / matplotlib / manage_stats.exe pp)
+    v} *)
 
-    A Tezos node (may) output a [Stat_trace] file.
+let seq_take count_expected seq =
+  let rec aux seq took_rev count_sofar =
+    if count_sofar = count_expected then List.rev took_rev
+    else
+      match seq () with
+      | Seq.Nil -> List.rev took_rev
+      | Cons (v, seq) -> aux seq (v :: took_rev) (count_sofar + 1)
+  in
+  aux seq [] 0
 
-    {e trace_stats.exe summarise} takes a [Stat_trace] file and summarises it to
-    a {e boostrap_summary.json} file.
+module Raw_actions_trace = struct
+  module V0 = struct
+    let version = 0
 
-    A series of python script take a {e boostrap_summary.json} file and produce
-    plots (e.g. png files).
+    type header = unit [@@deriving repr]
+    type key = string list [@@deriving repr]
+    type hash = string [@@deriving repr]
+    type commit_hash = hash [@@deriving repr]
+    type message = string [@@deriving repr]
+    type tracker = int64 [@@deriving repr]
 
-    {e tree.exe} takes a [Replayable_trace] file, internally produces a
-    [Stat_trace] file and yields it to [Trace_stat_summary] to produce a
-    {e boostrap_summary.json} file. *)
+    type tracker_range = { first_tracker : tracker; count : int }
+    [@@deriving repr]
 
-(** [Replayable_trace], a trace of Tezos's interactions with Irmin.
+    type tree = tracker [@@deriving repr]
+    type trees_with_contiguous_trackers = tracker_range [@@deriving repr]
+    type context = tracker [@@deriving repr]
+    type value = bytes [@@deriving repr]
+    type md5 = Digestif.MD5.t
+
+    let md5_t : md5 Repr.t =
+      Repr.map Repr.string Digestif.MD5.of_raw_string Digestif.MD5.to_raw_string
+
+    type step = string [@@deriving repr]
+
+    type depth =
+      [ `Eq of int | `Ge of int | `Gt of int | `Le of int | `Lt of int ]
+    [@@deriving repr]
+
+    type block_level = int32 [@@deriving repr]
+    type time_protocol = int64 [@@deriving repr]
+    type merkle_leaf_kind = [ `Hole | `Raw_context ] [@@deriving repr]
+    type chain_id = string [@@deriving repr]
+
+    type test_chain_status_forking = {
+      protocol : hash;
+      expiration : time_protocol;
+    }
+    [@@deriving repr]
+
+    type test_chain_status_running = {
+      chain_id : chain_id;
+      genesis : hash;
+      protocol : hash;
+      expiration : time_protocol;
+    }
+    [@@deriving repr]
+
+    type test_chain_status =
+      | Not_running
+      | Forking of test_chain_status_forking
+      | Running of test_chain_status_running
+    [@@deriving repr]
+
+    type system_wide_timestamp = float [@@deriving repr]
+
+    type timestamp_bounds = {
+      before : system_wide_timestamp;
+      after : system_wide_timestamp;
+    }
+    [@@deriving repr]
+
+    type ('input, 'output) fn = 'input * 'output [@@deriving repr]
+
+    module Tree = struct
+      type raw = [ `Value of value | `Tree of (step * raw) list ]
+      [@@deriving repr]
+
+      type t =
+        (* [_o __ ___] *)
+        | Empty of (unit, tree) fn
+        | Of_raw of (raw, tree) fn
+        | Of_value of (value, tree) fn
+        (* [i_ __ ___] *)
+        | Mem of (tree * key, bool) fn
+        | Mem_tree of (tree * key, bool) fn
+        | Find of (tree * key, md5 option (* recording hash of bytes *)) fn
+        | Is_empty of (tree, bool) fn
+        | Kind of (tree, [ `Tree | `Value ]) fn
+        | Hash of (tree, hash) fn
+        | Equal of (tree * tree, bool) fn
+        | To_value of (tree, md5 option (* recording hash of bytes *)) fn
+        | Clear of (int option * tree, unit) fn
+        (* [io __ ___] *)
+        | Find_tree of (tree * key, tree option) fn
+        | List of
+            ( tree * int option * int option,
+              trees_with_contiguous_trackers (* not recording the steps *) )
+            fn
+        | Add of (tree * key * value, tree) fn
+        | Add_tree of (tree * key * tree, tree) fn
+        | Remove of (tree * key, tree) fn
+        | Fold_start of depth option * tree * key
+        | Fold_step_enter of tree
+        | Fold_step_exit of tree
+        | Fold_end of int
+        (* loosely tracked *)
+        | Shallow
+        | To_raw
+        | Pp
+      [@@deriving repr]
+    end
+
+    type row =
+      (* [** __ ___] *)
+      | Tree of Tree.t
+      (* [_o i_ ___] *)
+      | Find_tree of (context * key, tree option) fn
+      | List of
+          ( context * int option * int option,
+            trees_with_contiguous_trackers (* not recording the steps *) )
+          fn
+      | Fold_start of depth option * context * key
+      | Fold_step_enter of tree
+      | Fold_step_exit of tree
+      | Fold_end of int
+      (* [i_ io ___]*)
+      | Add_tree of (context * key * tree, tree) fn
+      (* [__ i_ ___] *)
+      | Mem of (context * key, bool) fn
+      | Mem_tree of (context * key, bool) fn
+      | Find of (context * key, md5 option (* recording hash of bytes *)) fn
+      | Get_protocol of (context, hash) fn
+      | Hash of (time_protocol * message option * context, commit_hash) fn
+      | Merkle_tree of
+          ( context * merkle_leaf_kind * step list,
+            unit (* not recording the block_servied.merkle_tree *) )
+          fn
+      | Find_predecessor_block_metadata_hash of (context, hash option) fn
+      | Find_predecessor_ops_metadata_hash of (context, hash option) fn
+      | Get_test_chain of (context, test_chain_status) fn
+      (* [__ __ i__] *)
+      | Exists of (commit_hash, bool) fn * timestamp_bounds
+      | Retrieve_commit_info of
+          ( commit_hash,
+            bool (* only recording is_ok of that massive tuple *) )
+          fn
+          * timestamp_bounds
+      (* [__ io ___] *)
+      | Add of (context * key * value, context) fn
+      | Remove of (context * key, context) fn
+      | Add_protocol of (context * hash, context) fn
+      | Add_predecessor_block_metadata_hash of (context * hash, context) fn
+      | Add_predecessor_ops_metadata_hash of (context * hash, context) fn
+      | Add_test_chain of (context * test_chain_status, context) fn
+      | Remove_test_chain of (context, context) fn
+      | Fork_test_chain of (context * hash * time_protocol, context) fn
+      (* [__ _o i__] *)
+      | Checkout of (commit_hash, context option) fn * timestamp_bounds
+      | Checkout_exn of
+          (commit_hash, (context, unit) result) fn * timestamp_bounds
+      (* [__ __ i_m] *)
+      | Close
+      | Sync of timestamp_bounds
+      | Set_master of (commit_hash, unit) fn
+      | Set_head of (chain_id * commit_hash, unit) fn
+      | Commit_genesis of
+          (chain_id * time_protocol * hash, (commit_hash, unit) result) fn
+          * timestamp_bounds
+      | Clear_test_chain of (chain_id, unit) fn
+      (* [__ i_ __m] *)
+      | Commit of
+          (time_protocol * message option * context, commit_hash) fn
+          * timestamp_bounds
+      | Commit_test_chain_genesis of
+          ( context * (time_protocol * block_level * hash),
+            unit (* block header not recorded *) )
+          fn
+          * timestamp_bounds
+      (* [__ ~~ _o_] *)
+      | Init of (bool option, unit) fn
+      | Patch_context_enter of context
+      | Patch_context_exit of context * (context, unit) result
+      (* loosely tracked *)
+      | Restore_context
+      | Restore_integrity
+      | Dump_context
+      | Check_protocol_commit_consistency
+      | Validate_context_hash_consistency_and_commit
+    [@@deriving repr]
+  end
+
+  module Latest = V0
+  include Latest
+
+  include Trace_common.Io (struct
+    module Latest = Latest
+
+    (** Irmin's Replayable Bootstrap Trace *)
+    let magic = Trace_common.Magic.of_string "IrmRawBT"
+
+    let get_version_converter = function
+      | 0 ->
+          Trace_common.Version_converter
+            {
+              header_t = V0.header_t;
+              row_t = V0.row_t;
+              upgrade_header = Fun.id;
+              upgrade_row = Fun.id;
+            }
+      | i -> Fmt.invalid_arg "Unknown Raw_actions_trace version %d" i
+  end)
+
+  type file_type = [ `Ro | `Rw | `Misc ]
+
+  let type_of_file p =
+    let reader = open_reader p |> snd in
+    let l = seq_take 10 reader in
+    let ros =
+      List.filter (function Init (Some true, _) -> true | _ -> false) l
+    in
+    let rws =
+      List.filter
+        (function Init (Some false, _) | Init (None, _) -> true | _ -> false)
+        l
+    in
+    match (List.length ros, List.length rws) with
+    | 1, 0 -> `Ro
+    | 0, 1 -> `Rw
+    | _ -> `Misc
+
+  let trace_files_of_trace_directory ?filter prefix : (string * int) list =
+    let filter =
+      match filter with
+      | None -> [ `Ro; `Rw; `Misc ]
+      | Some v -> (v :> file_type list)
+    in
+    let parse_filename p =
+      match String.split_on_char '.' p with
+      | [ "raw_actions_trace"; pid; "trace" ] -> int_of_string_opt pid
+      | _ -> None
+    in
+    Sys.readdir prefix
+    |> Array.to_list
+    |> List.filter_map (fun p ->
+           match parse_filename p with
+           | Some pid -> Some (Filename.concat prefix p, pid)
+           | None -> None)
+    |> List.filter (fun (p, _) -> List.mem (type_of_file p) filter)
+end
+
+(** [Replayable_actions_trace], a trace of Tezos's interactions with Irmin.
 
     {3 Interleaved Contexts and Commits}
 
@@ -59,59 +325,183 @@
     discard a recorded pair as soon as possible.
 
     In practice, there is only 1 context and 1 commit in history, and sometimes
-    0 or 2, but the code is ready for more. *)
-module Replayable_trace = struct
-  module V0 = struct
-    let version = 0
+    0 or 2, but the code is ready for more.
 
-    type header = unit [@@deriving repr]
-    type 'a scope = Forget of 'a | Keep of 'a [@@deriving repr]
+    The same concept goes for trees. *)
+module Replayable_actions_trace = struct
+  module V1 = struct
+    let version = 1
+
     type key = string list [@@deriving repr]
     type hash = string [@@deriving repr]
     type message = string [@@deriving repr]
-    type context_id = int64 [@@deriving repr]
+    type tracker = int64 [@@deriving repr]
+    type step = string [@@deriving repr]
+    type value = bytes [@@deriving repr]
+    type md5 = Digestif.MD5.t
 
-    type add = {
-      key : key;
-      value : string;
-      in_ctx_id : context_id scope;
-      out_ctx_id : context_id scope;
+    let md5_t : md5 Repr.t =
+      Repr.map Repr.string Digestif.MD5.of_raw_string Digestif.MD5.to_raw_string
+
+    type depth =
+      [ `Eq of int | `Ge of int | `Gt of int | `Le of int | `Lt of int ]
+    [@@deriving repr]
+
+    type block_level = int [@@deriving repr]
+    type time_protocol = int64 [@@deriving repr]
+    type merkle_leaf_kind = [ `Hole | `Raw_context ] [@@deriving repr]
+    type chain_id = string [@@deriving repr]
+
+    type test_chain_status_forking = {
+      protocol : hash;
+      expiration : time_protocol;
     }
     [@@deriving repr]
 
-    type copy = {
-      key_src : key;
-      key_dst : key;
-      in_ctx_id : context_id scope;
-      out_ctx_id : context_id scope;
+    type test_chain_status_running = {
+      chain_id : chain_id;
+      genesis : hash;
+      protocol : hash;
+      expiration : time_protocol;
     }
     [@@deriving repr]
 
-    type commit = {
-      hash : hash scope;
-      date : int64;
-      message : message;
-      parents : hash scope list;
-      in_ctx_id : context_id scope;
-    }
+    type test_chain_status =
+      | Not_running
+      | Forking of test_chain_status_forking
+      | Running of test_chain_status_running
     [@@deriving repr]
 
-    type row =
-      (* Operation(s) that create a context from none *)
-      | Checkout of hash scope * context_id scope
-      (* Operations that create a context from one *)
-      | Add of add
-      | Remove of key * context_id scope * context_id scope
-      | Copy of copy
-      (* Operations that just read a context *)
-      | Find of key * bool * context_id scope
-      | Mem of key * bool * context_id scope
-      | Mem_tree of key * bool * context_id scope
-      | Commit of commit
+    (** [scope_instanciation] tags are used in replay to identify the situations
+        where a hash is created but has already been created, i.e. when two
+        commits have the same hash. *)
+    type scope_start_rhs = First_instanciation | Reinstanciation
+    [@@deriving repr]
+
+    (** [scope_start] tags are used in replay to identify the situations where a
+        hash is required but was never seen, e.g. the first checkout of a replay
+        that starts on a snapshot. *)
+    type scope_start_lhs = Instanciated | Not_instanciated [@@deriving repr]
+
+    (** [scope_end] tags are used in replay to garbage collect the values in
+        cache. *)
+    type scope_end = Last_occurence | Will_reoccur [@@deriving repr]
+
+    type tree = scope_end * tracker [@@deriving repr]
+    type context = scope_end * tracker [@@deriving repr]
+    type commit_hash_rhs = scope_start_rhs * scope_end * hash [@@deriving repr]
+    type commit_hash_lhs = scope_start_lhs * scope_end * hash [@@deriving repr]
+    type ('input, 'output) fn = 'input * 'output [@@deriving repr]
+
+    module Tree = struct
+      type raw = [ `Value of value | `Tree of (step * raw) list ]
+      [@@deriving repr]
+
+      type t =
+        (* [_o __ ___] *)
+        | Empty of (unit, tree) fn
+        | Of_raw of (raw, tree) fn
+        | Of_value of (value, tree) fn
+        (* [i_ __ ___] *)
+        | Mem of (tree * key, bool) fn
+        | Mem_tree of (tree * key, bool) fn
+        | Find of (tree * key, bool (* recording is_some *)) fn
+        | Is_empty of (tree, bool) fn
+        | Kind of (tree, [ `Tree | `Value ]) fn
+        | Hash of (tree, unit (* not recorded *)) fn
+        | Equal of (tree * tree, bool) fn
+        | To_value of (tree, bool (* recording is_some *)) fn
+        | Clear of (int option * tree, unit) fn
+        (* [io __ ___] *)
+        | Find_tree of (tree * key, tree option) fn
+        | Add of (tree * key * value, tree) fn
+        | Add_tree of (tree * key * tree, tree) fn
+        | Remove of (tree * key, tree) fn
+      [@@deriving repr]
+    end
+
+    type event =
+      (* [** __ ___] *)
+      | Tree of Tree.t
+      (* [_o i_ ___] *)
+      | Find_tree of (context * key, tree option) fn
+      | Fold_start of depth option * context * key
+      | Fold_step_enter of tree
+      | Fold_step_exit of tree
+      | Fold_end
+      (* [i_ io ___]*)
+      | Add_tree of (context * key * tree, tree) fn
+      (* [__ i_ ___] *)
+      | Mem of (context * key, bool) fn
+      | Mem_tree of (context * key, bool) fn
+      | Find of (context * key, bool (* recording is_some *)) fn
+      | Get_protocol of (context, unit (* not recorded *)) fn
+      | Hash of
+          (time_protocol * message option * context, unit (* not recorded *)) fn
+      | Find_predecessor_block_metadata_hash of
+          (context, unit (* not recorded *)) fn
+      | Find_predecessor_ops_metadata_hash of
+          (context, unit (* not recorded *)) fn
+      | Get_test_chain of (context, unit (* not recorded *)) fn
+      (* [__ __ i__] *)
+      | Exists of (commit_hash_lhs, bool) fn
+      | Retrieve_commit_info of
+          ( commit_hash_lhs,
+            bool (* only recording is_ok of that massive tuple *) )
+          fn
+      (* [__ io ___] *)
+      | Add of (context * key * value, context) fn
+      | Remove of (context * key, context) fn
+      | Add_protocol of (context * hash, context) fn
+      | Add_predecessor_block_metadata_hash of (context * hash, context) fn
+      | Add_predecessor_ops_metadata_hash of (context * hash, context) fn
+      | Add_test_chain of (context * test_chain_status, context) fn
+      | Remove_test_chain of (context, context) fn
+      | Fork_test_chain of (context * hash * time_protocol, context) fn
+      (* [__ _o i__] *)
+      | Checkout of (commit_hash_lhs, context) fn
+      (* | Checkout_exn of (commit_hash, context) fn *)
+      (* [__ __ i_m] *)
+      (* | Close *)
+      (* | Sync *)
+      (* | Set_master of (commit_hash, unit) fn *)
+      (* | Set_head of (chain_id * commit_hash, unit) fn *)
+      | Commit_genesis of (chain_id * time_protocol * hash, commit_hash_rhs) fn
+      | Clear_test_chain of (chain_id, unit) fn
+      (* [__ i_ __m] *)
+      | Commit of (time_protocol * message option * context, commit_hash_rhs) fn
+      (* [__ ~~ _o_] *)
+      | Init of (bool option, unit) fn
+      | Patch_context_enter of context
+      | Patch_context_exit of context * context
+    (* * block_info option *)
+    (* | Commit_test_chain_genesis of
+     *     ( context * (time_protocol * block_level * hash),
+     *       unit (\* output not recorded *\) )
+     *     fn *)
+    [@@deriving repr]
+
+    type row = {
+      level : int;
+      op_count : int;
+      op_count_tx : int;
+      op_count_contract : int;
+      ops : event array;
+      uses_patch_context : bool;
+    }
+    [@@deriving repr]
+    (** Events of a block. The first/last are either init/commit_genesis or
+        checkout(exn)/commit. *)
+
+    type header = {
+      initial_block : (block_level * hash) option;
+      last_block : block_level * hash;
+      block_count : int;
+    }
     [@@deriving repr]
   end
 
-  module Latest = V0
+  module Latest = V1
   include Latest
 
   include Trace_common.Io (struct
@@ -121,15 +511,16 @@ module Replayable_trace = struct
     let magic = Trace_common.Magic.of_string "IrmRepBT"
 
     let get_version_converter = function
-      | 0 ->
+      | 0 -> failwith "replayable actions trace v0 are deprecated"
+      | 1 ->
           Trace_common.Version_converter
             {
-              header_t = V0.header_t;
-              row_t = V0.row_t;
+              header_t = V1.header_t;
+              row_t = V1.row_t;
               upgrade_header = Fun.id;
               upgrade_row = Fun.id;
             }
-      | i -> Fmt.invalid_arg "Unknown Replayable_trace version %d" i
+      | i -> Fmt.invalid_arg "Unknown replayable actions trace version %d" i
   end)
 end
 

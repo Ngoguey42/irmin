@@ -1,0 +1,9 @@
+(library
+ (name tezos_context_sigs)
+ (public_name tezos-context.sigs)
+ (libraries tezos-base
+            tezos-shell-services
+            irmin
+            irmin-pack)
+ (flags (:standard -open Tezos_shell_services
+                   -open Tezos_base__TzPervasives)))

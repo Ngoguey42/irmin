@@ -26,6 +26,7 @@ type config = {
   width : int;
   nlarge_trees : int;
   store_dir : string;
+  startup_store_type : [ `Fresh | `Copy_from of string ];
   path_conversion : [ `None | `V1 | `V0_and_v1 | `V0 ];
   inode_config : int * int;
   store_type : [ `Pack | `Pack_layered | `Pack_mem ];
@@ -38,116 +39,122 @@ type config = {
   empty_blobs : bool;
 }
 
-module type Store = sig
-  type store_config = config
+module type Store = Trace_replay.Store with type store_config = config
+(*                       sig
+ *   type store_config = config
+ *
+ *   include Irmin.KV with type contents = bytes
+ *
+ *   type on_commit := int -> Hash.t -> unit Lwt.t
+ *   type on_end := unit -> unit Lwt.t
+ *   type pp := Format.formatter -> unit
+ *
+ *   val create_repo : store_config -> (Repo.t * on_commit * on_end * pp) Lwt.t
+ * end *)
 
-  include Irmin.KV with type contents = bytes
+(* let pp_inode_config ppf (entries, stable_hash) =
+ *   Format.fprintf ppf "[%d, %d]" entries stable_hash
+ *
+ * let pp_store_type ppf = function
+ *   | `Pack -> Format.fprintf ppf "[pack store]"
+ *   | `Pack_layered -> Format.fprintf ppf "[pack-layered store]"
+ *   | `Pack_mem -> Format.fprintf ppf "[pack-mem store]"
+ *
+ * module Benchmark = struct
+ *   type result = { time : float; size : int }
+ *
+ *   let run config f =
+ *     let+ time, res = with_timer f in
+ *     let size = FSHelper.get_size config.store_dir in
+ *     ({ time; size }, res)
+ *
+ *   let pp_results ppf result =
+ *     Format.fprintf ppf "Total time: %f@\nSize on disk: %d M" result.time
+ *       result.size
+ * end *)
 
-  type on_commit := int -> Hash.t -> unit Lwt.t
-  type on_end := unit -> unit Lwt.t
-  type pp := Format.formatter -> unit
-
-  val create_repo : store_config -> (Repo.t * on_commit * on_end * pp) Lwt.t
-end
-
-let pp_inode_config ppf (entries, stable_hash) =
-  Format.fprintf ppf "[%d, %d]" entries stable_hash
-
-let pp_store_type ppf = function
-  | `Pack -> Format.fprintf ppf "[pack store]"
-  | `Pack_layered -> Format.fprintf ppf "[pack-layered store]"
-  | `Pack_mem -> Format.fprintf ppf "[pack-mem store]"
-
-module Benchmark = struct
-  type result = { time : float; size : int }
-
-  let run config f =
-    let+ time, res = with_timer f in
-    let size = FSHelper.get_size config.store_dir in
-    ({ time; size }, res)
-
-  let pp_results ppf result =
-    Format.fprintf ppf "Total time: %f@\nSize on disk: %d M" result.time
-      result.size
-end
-
-module Hash = Irmin.Hash.SHA1
+(* module Hash = Irmin.Hash.SHA1 *)
 
 module Bench_suite (Store : Store) = struct
-  module Info = Info (Store.Info)
+  (* module Info = Info (Store.Info) *)
 
-  let init_commit repo =
-    Store.Commit.v repo ~info:(Info.f ()) ~parents:[] Store.Tree.empty
+  (* let init_commit repo =
+   *   Store.Commit.v repo ~info:(Info.f ()) ~parents:[] Store.Tree.empty *)
 
-  module Trees = Generate_trees (Store)
+  (* module Trees = Generate_trees (Store) *)
   module Trace_replay = Trace_replay.Make (Store)
 
-  let checkout_and_commit repo prev_commit f =
-    Store.Commit.of_hash repo prev_commit >>= function
-    | None -> Lwt.fail_with "commit not found"
-    | Some commit ->
-        let tree = Store.Commit.tree commit in
-        let* tree = f tree in
-        Store.Commit.v repo ~info:(Info.f ()) ~parents:[ prev_commit ] tree
+  (* let checkout_and_commit repo prev_commit f =
+   *   Store.Commit.of_hash repo prev_commit >>= function
+   *   | None -> Lwt.fail_with "commit not found"
+   *   | Some commit ->
+   *       let tree = Store.Commit.tree commit in
+   *       let* tree = f tree in
+   *       Store.Commit.v repo ~info:(Info.f ()) ~parents:[ prev_commit ] tree
+   *
+   * let add_commits ~message repo ncommits on_commit on_end f () =
+   *   with_progress_bar ~message ~n:ncommits ~unit:"commits" @@ fun prog ->
+   *   let* c = init_commit repo in
+   *   let rec aux c i =
+   *     if i >= ncommits then on_end ()
+   *     else
+   *       let* c' = checkout_and_commit repo (Store.Commit.hash c) f in
+   *       let* () = on_commit i (Store.Commit.hash c') in
+   *       prog Int64.one;
+   *       aux c' (i + 1)
+   *   in
+   *   aux c 0 *)
 
-  let add_commits ~message repo ncommits on_commit on_end f () =
-    with_progress_bar ~message ~n:ncommits ~unit:"commits" @@ fun prog ->
-    let* c = init_commit repo in
-    let rec aux c i =
-      if i >= ncommits then on_end ()
-      else
-        let* c' = checkout_and_commit repo (Store.Commit.hash c) f in
-        let* () = on_commit i (Store.Commit.hash c') in
-        prog Int64.one;
-        aux c' (i + 1)
-    in
-    aux c 0
+  let run_large (config : config) =
+    ignore config;
+    failwith "truc"
+  (* reset_stats ();
+   * let* repo, on_commit, on_end, repo_pp = Store.create_repo' config in
+   * let* result, () =
+   *   Trees.add_large_trees config.width config.nlarge_trees
+   *   |> add_commits ~message:"Playing large mode" repo config.ncommits
+   *        on_commit on_end
+   *   |> Benchmark.run config
+   * in
+   * let+ () = Store.Repo.close repo in
+   * fun ppf ->
+   *   Format.fprintf ppf
+   *     "Large trees mode on inode config %a, %a: %d commits, each consisting \
+   *      of %d large trees of %d entries@\n\
+   *      %t@\n\
+   *      %a"
+   *     pp_inode_config config.inode_config pp_store_type config.store_type
+   *     config.ncommits config.nlarge_trees config.width repo_pp
+   *     Benchmark.pp_results result *)
 
-  let run_large config =
-    reset_stats ();
-    let* repo, on_commit, on_end, repo_pp = Store.create_repo config in
-    let* result, () =
-      Trees.add_large_trees config.width config.nlarge_trees
-      |> add_commits ~message:"Playing large mode" repo config.ncommits
-           on_commit on_end
-      |> Benchmark.run config
-    in
-    let+ () = Store.Repo.close repo in
-    fun ppf ->
-      Format.fprintf ppf
-        "Large trees mode on inode config %a, %a: %d commits, each consisting \
-         of %d large trees of %d entries@\n\
-         %t@\n\
-         %a"
-        pp_inode_config config.inode_config pp_store_type config.store_type
-        config.ncommits config.nlarge_trees config.width repo_pp
-        Benchmark.pp_results result
+  let run_chains (config : config) =
+    ignore config;
+    failwith "truc"
+  (* reset_stats ();
+   * let* repo, on_commit, on_end, repo_pp = Store.create_repo' config in
+   * let* result, () =
+   *   Trees.add_chain_trees config.depth config.nchain_trees
+   *   |> add_commits ~message:"Playing chain mode" repo config.ncommits
+   *        on_commit on_end
+   *   |> Benchmark.run config
+   * in
+   * let+ () = Store.Repo.close repo in
+   * fun ppf ->
+   *   Format.fprintf ppf
+   *     "Chain trees mode on inode config %a, %a: %d commits, each consisting \
+   *      of %d chains of depth %d@\n\
+   *      %t@\n\
+   *      %a"
+   *     pp_inode_config config.inode_config pp_store_type config.store_type
+   *     config.ncommits config.nchain_trees config.depth repo_pp
+   *     Benchmark.pp_results result *)
 
-  let run_chains config =
-    reset_stats ();
-    let* repo, on_commit, on_end, repo_pp = Store.create_repo config in
-    let* result, () =
-      Trees.add_chain_trees config.depth config.nchain_trees
-      |> add_commits ~message:"Playing chain mode" repo config.ncommits
-           on_commit on_end
-      |> Benchmark.run config
-    in
-    let+ () = Store.Repo.close repo in
-    fun ppf ->
-      Format.fprintf ppf
-        "Chain trees mode on inode config %a, %a: %d commits, each consisting \
-         of %d chains of depth %d@\n\
-         %t@\n\
-         %a"
-        pp_inode_config config.inode_config pp_store_type config.store_type
-        config.ncommits config.nchain_trees config.depth repo_pp
-        Benchmark.pp_results result
-
-  let run_read_trace config =
+  let run_read_trace (config : config) =
     let replay_config : Irmin_traces.Trace_replay.config =
       {
         ncommits_trace = config.ncommits_trace;
         store_dir = config.store_dir;
+        startup_store_type = config.startup_store_type;
         path_conversion = config.path_conversion;
         inode_config = config.inode_config;
         store_type = config.store_type;
@@ -162,6 +169,8 @@ module Bench_suite (Store : Store) = struct
     Trace_replay.run config replay_config
 end
 
+open Tezos_context_encoding.Context
+
 module Make_store_layered (Conf : sig
   val entries : int
   val stable_hash : int
@@ -169,79 +178,111 @@ end) =
 struct
   type store_config = config
 
-  open Tezos_context_hash_irmin.Encoding
-
   module Store =
     Irmin_pack_layered.Maker_ext (Conf) (Node) (Commit) (Metadata) (Contents)
       (Path)
       (Branch)
       (Hash)
 
-  let create_repo config =
-    let conf = Irmin_pack.config ~readonly:false ~fresh:true config.store_dir in
-    let* repo = Store.Repo.v conf in
-    let on_commit i commit_hash =
-      let* () =
-        if i = config.freeze_commit then
-          let* c = Store.Commit.of_hash repo commit_hash in
-          let c = Option.get c in
-          Store.freeze repo ~max_lower:[ c ]
-        else Lwt.return_unit
-      in
-      (* Something else than pause could be used here, like an Lwt_unix.sleep
-         or nothing. See #1293 *)
-      Lwt.pause ()
-    in
-    let on_end () = Store.Private_layer.wait_for_freeze repo in
-    let pp ppf =
-      if Irmin_layers.Stats.get_freeze_count () = 0 then
-        Format.fprintf ppf "no freeze"
-      else Format.fprintf ppf "%t" Irmin_layers.Stats.pp_latest
-    in
-    Lwt.return (repo, on_commit, on_end, pp)
+  let create_repo ~readonly root =
+    let conf = Irmin_pack.config ~readonly ~fresh:true root in
+    Store.Repo.v conf
+
+  (* let create_repo' config =
+   *   let conf = Irmin_pack.config ~readonly:false ~fresh:true config.store_dir in
+   *   let* repo = Store.Repo.v conf in
+   *   let on_commit i commit_hash =
+   *     let* () =
+   *       if i = config.freeze_commit then
+   *         let* c = Store.Commit.of_hash repo commit_hash in
+   *         let c = Option.get c in
+   *         Store.freeze repo ~max_lower:[ c ]
+   *       else Lwt.return_unit
+   *     in
+   *     (\* Something else than pause could be used here, like an Lwt_unix.sleep
+   *        or nothing. See #1293 *\)
+   *     Lwt.pause ()
+   *   in
+   *   let on_end () = Store.Private_layer.wait_for_freeze repo in
+   *   let pp ppf =
+   *     if Irmin_layers.Stats.get_freeze_count () = 0 then
+   *       Format.fprintf ppf "no freeze"
+   *     else Format.fprintf ppf "%t" Irmin_layers.Stats.pp_latest
+   *   in
+   *   Lwt.return (repo, on_commit, on_end, pp) *)
 
   include Store
 end
 
-open Tezos_context_hash_irmin.Encoding
+open Tezos_context_encoding.Context
 
-module type Impl = functor
-  (_ : Irmin.Private.Node.Maker)
-  (_ : Irmin.Private.Commit.Maker)
-  -> Irmin_pack.Maker
+(* module type Impl = functor
+ *   (_ : Irmin.Private.Node.Maker)
+ *   (_ : Irmin.Private.Commit.Maker)
+ *   -> Irmin_pack.Maker *)
 
-module Make_basic
-    (Impl : Impl) (Conf : sig
-      val entries : int
-      val stable_hash : int
-    end) =
+module Make_store_pack (Conf : sig
+  val entries : int
+  val stable_hash : int
+end) =
 struct
-  module Maker = Impl (Node) (Commit) (Conf)
+  module Maker =
+    Irmin_pack.Maker_ext (Irmin_pack.Version.V1) (Conf) (Node) (Commit)
+
   module Store = Maker.Make (Metadata) (Contents) (Path) (Branch) (Hash)
 
   type store_config = config
 
-  let create_repo config =
-    let conf = Irmin_pack.config ~readonly:false ~fresh:true config.store_dir in
-    let* repo = Store.Repo.v conf in
-    let on_commit _ _ = Lwt.return_unit in
-    let on_end () = Lwt.return_unit in
-    let pp _ = () in
-    Lwt.return (repo, on_commit, on_end, pp)
+  (* let create_repo' config =
+   *   let conf = Irmin_pack.config ~readonly:false ~fresh:true config.store_dir in
+   *   let* repo = Store.Repo.v conf in
+   *   let on_commit _ _ = Lwt.return_unit in
+   *   let on_end () = Lwt.return_unit in
+   *   let pp _ = () in
+   *   Lwt.return (repo, on_commit, on_end, pp) *)
+
+  let create_repo ~readonly root =
+    let conf = Irmin_pack.config ~readonly ~fresh:true root in
+    Store.Repo.v conf
 
   include Store
 end
 
-module Make_store_mem = Make_basic (Irmin_pack_mem.Maker)
+module Make_store_mem (Conf : sig
+  val entries : int
+  val stable_hash : int
+end) =
+struct
+  module Maker = Irmin_pack_mem.Maker (Node) (Commit) (Conf)
+  module Store = Maker.Make (Metadata) (Contents) (Path) (Branch) (Hash)
 
-module Make_store_pack =
-  Make_basic
-    ((functor
-       (Node : Irmin.Private.Node.Maker)
-       (Commit : Irmin.Private.Commit.Maker)
-       (C : Irmin_pack.Conf.S)
-       ->
-       Irmin_pack.Maker_ext (Irmin_pack.Version.V1) (C) (Node) (Commit)))
+  type store_config = config
+
+  (* let create_repo' config =
+   *   let conf = Irmin_pack.config ~readonly:false ~fresh:true config.store_dir in
+   *   let* repo = Store.Repo.v conf in
+   *   let on_commit _ _ = Lwt.return_unit in
+   *   let on_end () = Lwt.return_unit in
+   *   let pp _ = () in
+   *   Lwt.return (repo, on_commit, on_end, pp) *)
+
+  let create_repo ~readonly root =
+    let conf = Irmin_pack.config ~readonly ~fresh:true root in
+    Store.Repo.v conf
+
+  include Store
+end
+
+(* module Make_store_mem = Make_basic (Irmin_pack_mem.Maker) *)
+
+(* module Make_store_pack =
+ *   Make_basic
+ *     ((functor
+ *        (Node : Irmin.Private.Node.Maker)
+ *        (Commit : Irmin.Private.Commit.Maker)
+ *        (C : Irmin_pack.Conf.S)
+ *        ->
+ *        Irmin_pack.Maker_ext (Irmin_pack.Version.V1) (C) (Node) (Commit))) *)
 
 module type B = sig
   val run_large : config -> (Format.formatter -> unit) Lwt.t
@@ -366,7 +407,7 @@ let get_suite suite_filter =
 let main () ncommits ncommits_trace suite_filter inode_config store_type
     freeze_commit path_conversion depth width nchain_trees nlarge_trees
     commit_data_file artefacts_dir keep_store keep_stat_trace no_summary
-    empty_blobs =
+    empty_blobs startup_store_copy =
   let default = match suite_filter with `Quick -> 10000 | _ -> 13315 in
   let ncommits_trace = Option.value ~default ncommits_trace in
   let config =
@@ -374,6 +415,10 @@ let main () ncommits ncommits_trace suite_filter inode_config store_type
       ncommits;
       ncommits_trace;
       store_dir = Filename.concat artefacts_dir "store";
+      startup_store_type =
+        (match startup_store_copy with
+        | None -> `Fresh
+        | Some v -> `Copy_from v);
       path_conversion;
       depth;
       width;
@@ -539,6 +584,17 @@ let commit_data_file =
   in
   Arg.(required @@ pos 0 (some string) None doc)
 
+let startup_store_copy =
+  let doc =
+    Arg.info ~docv:"PATH"
+      ~doc:
+        "Path to a directory that contains and irmin-pack store that shall \
+         serve as a basis for replay. The provided path is not modified. If \
+         not provided, the replay stats from a fresh store."
+      [ "startup-store-copy" ]
+  in
+  Arg.(value @@ opt (some string) None doc)
+
 let artefacts_dir =
   let doc =
     Arg.info ~docv:"PATH" ~doc:"Destination of the bench artefacts."
@@ -569,7 +625,8 @@ let main_term =
     $ keep_store
     $ keep_stat_trace
     $ no_summary
-    $ empty_blobs)
+    $ empty_blobs
+    $ startup_store_copy)
 
 let () =
   let man =
@@ -577,7 +634,7 @@ let () =
       `S "DESCRIPTION";
       `P
         "Benchmarks for tree operations. Requires traces of operations, \
-         download them (`wget trace.repr`) from: ";
+         download them (`wget trace.repr`) from:";
       `P
         "Trace with $(b,10310) commits \
          http://data.tarides.com/irmin/data4_10310commits.repr";

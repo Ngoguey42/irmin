@@ -14,6 +14,29 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
+module Seq = struct
+  include Seq
+
+  let mapi64 s =
+    let i = ref (-1L) in
+    Seq.map
+      (fun v ->
+        i := Int64.succ !i;
+        (!i, v))
+      s
+
+  let take_up_to ~is_last seq =
+    let rec aux seq rev_l =
+      match seq () with
+      | Nil -> failwith "Could not take_up_to, end of sequence reached."
+      | Cons (v, seq) ->
+          let rev_l = v :: rev_l in
+          if is_last v then (seq, rev_l) else aux seq rev_l
+    in
+    let seq, rev_l = aux seq [] in
+    (seq, List.rev rev_l)
+end
+
 type histo = (float * int) list [@@deriving repr]
 type curve = float list [@@deriving repr]
 
@@ -116,84 +139,15 @@ let pp_percent ppf v =
     Format.fprintf ppf "%ce%cx" long_repr.[0] long_repr.[4])
   else Format.fprintf ppf "++++"
 
-let weekly_stats = Tezos_history_metrics.weekly_stats
+type block_info = Tezos_history_metrics.block_info
 
-let approx_value_count_of_block_count value_of_row ?(first_block_idx = 0)
-    wished_block_count =
-  let end_block_idx = first_block_idx + wished_block_count in
-  let blocks_of_row (_, _, _, v) = v in
-  let fold (week_block0_idx, acc_value, acc_blocks) row =
-    let week_blocks = blocks_of_row row in
-    let week_value = value_of_row row in
-    assert (acc_blocks <= wished_block_count);
-    let nextweek_block0_idx = week_block0_idx + week_blocks in
-    let kept_block_count =
-      let left =
-        if first_block_idx >= nextweek_block0_idx then `After
-        else if first_block_idx <= week_block0_idx then `Before
-        else `Inside
-      in
-      let right =
-        if end_block_idx >= nextweek_block0_idx then `After
-        else if end_block_idx <= week_block0_idx then `Before
-        else `Inside
-      in
-      match (left, right) with
-      | `After, `After -> 0
-      | `Before, `Before -> 0
-      | `Before, `After -> week_blocks
-      | `Inside, `After -> first_block_idx - week_block0_idx
-      | `Inside, `Inside -> end_block_idx - first_block_idx
-      | `Before, `Inside -> wished_block_count - acc_blocks
-      | `Inside, `Before -> assert false
-      | `After, (`Before | `Inside) -> assert false
-    in
-    assert (kept_block_count >= 0);
-    assert (kept_block_count <= week_blocks);
-    let kept_tx_count =
-      let f = float_of_int in
-      f week_value /. f week_blocks *. f kept_block_count
-      |> Float.round
-      |> int_of_float
-    in
-    assert (kept_tx_count >= 0);
-    assert (kept_tx_count <= week_value);
-    let acc_blocks' = acc_blocks + kept_block_count in
-    let acc_value' = acc_value + kept_tx_count in
-    (nextweek_block0_idx, acc_value', acc_blocks')
-  in
-  let _, acc_value, acc_blocks = List.fold_left fold (0, 0, 0) weekly_stats in
-  assert (acc_blocks <= wished_block_count);
-  if acc_blocks = wished_block_count then acc_value
-  else
-    (* Extrapolate for the following weeks *)
-    let latest_weeks_tx_count, latest_weeks_block_count =
-      match List.rev weekly_stats with
-      | rowa :: rowb :: rowc :: _ ->
-          let value =
-            List.map value_of_row [ rowa; rowb; rowc ] |> List.fold_left ( + ) 0
-          in
-          let blocks =
-            List.map blocks_of_row [ rowa; rowb; rowc ]
-            |> List.fold_left ( + ) 0
-          in
-          (value, blocks)
-      | _ -> assert false
-    in
-    let missing_blocks = wished_block_count - acc_blocks in
-    let missing_value =
-      let f = float_of_int in
-      f latest_weeks_tx_count /. f latest_weeks_block_count *. f missing_blocks
-      |> Float.round
-      |> int_of_float
-    in
-    acc_value + missing_value
+let operations_cache =
+  lazy
+    (Tezos_history_metrics.create
+       Filename.(concat (get_temp_dir_name ()) "tzstats-cache"))
 
-let approx_transaction_count_of_block_count =
-  approx_value_count_of_block_count (fun (_, txs, _, _) -> txs)
-
-let approx_operation_count_of_block_count =
-  approx_value_count_of_block_count (fun (_, _, ops, _) -> ops)
+let operations_of_block_level i =
+  Tezos_history_metrics.fetch (Lazy.force operations_cache) i
 
 module Exponential_moving_average = struct
   type t = {
@@ -402,6 +356,7 @@ module Variable_summary = struct
     max_value : float * int;
     min_value : float * int;
     mean : float;
+    diff : float;
     distribution : histo;
     evolution : curve;
   }
@@ -409,6 +364,8 @@ module Variable_summary = struct
 
   type acc = {
     (* Accumulators *)
+    first_value : float;
+    last_value : float;
     max_value : float * int;
     min_value : float * int;
     sum_value : float;
@@ -433,6 +390,8 @@ module Variable_summary = struct
     if out_sample_count < 2 then
       invalid_arg "out_sample_count should be greater than 1";
     {
+      first_value = Float.nan;
+      last_value = Float.nan;
       max_value = (Float.nan, 0);
       min_value = (Float.nan, 0);
       sum_value = 0.;
@@ -461,8 +420,10 @@ module Variable_summary = struct
     let sample_count = List.length xs |> float_of_int in
     assert (i < acc.in_period_count);
 
-    let accumulate_in_sample (((topv, _) as top), ((botv, _) as bot), histo, ma)
-        v =
+    let accumulate_in_sample
+        (first, last, ((topv, _) as top), ((botv, _) as bot), histo, ma) v =
+      let first = if Float.is_nan first then v else first in
+      let last = if Float.is_nan v then last else v in
       let top = if Float.is_nan topv || topv < v then (v, i) else top in
       let bot = if Float.is_nan botv || botv > v then (v, i) else bot in
       let v =
@@ -480,11 +441,16 @@ module Variable_summary = struct
       let ma =
         Exponential_moving_average.update_batch ma v (1. /. sample_count)
       in
-      (top, bot, histo, ma)
+      (first, last, top, bot, histo, ma)
     in
-    let max_value, min_value, distribution, ma =
+    let first_value, last_value, max_value, min_value, distribution, ma =
       List.fold_left accumulate_in_sample
-        (acc.max_value, acc.min_value, acc.distribution, acc.ma)
+        ( acc.first_value,
+          acc.last_value,
+          acc.max_value,
+          acc.min_value,
+          acc.distribution,
+          acc.ma )
         xs
     in
     let ma =
@@ -519,6 +485,8 @@ module Variable_summary = struct
 
     {
       acc with
+      first_value;
+      last_value;
       max_value;
       min_value;
       sum_value = List.fold_left ( +. ) acc.sum_value xs;
@@ -544,6 +512,7 @@ module Variable_summary = struct
       max_value = acc.max_value;
       min_value = acc.min_value;
       mean = acc.sum_value /. float_of_int acc.value_count;
+      diff = acc.last_value -. acc.first_value;
       distribution;
       evolution;
     }

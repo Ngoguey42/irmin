@@ -201,13 +201,17 @@ module Io (Ff : File_format) = struct
 
   let read_with_prefix_exn : (string -> int -> int * 'a) -> in_channel -> 'a =
    fun decode chan ->
+   Printf.eprintf "get len\n%!";
     (* First read the prefix *)
     let len = Var_int.read_exn chan in
+    Printf.eprintf "got len %d\n%!" len;
+    Printf.eprintf "gen val\n%!";
     (* Then read the repr. *)
     let len', v =
       (* This could fail if [len] is not long enough for repr (corruption) *)
       decode (really_input_string chan len) 0
     in
+    Printf.eprintf "got val\n%!";
     if len <> len' then
       Fmt.failwith
         "An value read in the Trace was expected to take %d bytes, but it took \
@@ -221,6 +225,7 @@ module Io (Ff : File_format) = struct
     let decode = Repr.decode_bin repr |> Repr.unstage in
     let produce_row () =
       try
+        Printf.eprintf "produce_row\n%!";
         let row = read_with_prefix_exn decode chan in
         Some (row, ())
       with End_of_file -> None
@@ -255,10 +260,9 @@ module Io (Ff : File_format) = struct
     in
     (header, seq)
 
-  type writer = { path : string; channel : out_channel; buffer : Buffer.t }
+  type writer = { channel : out_channel; buffer : Buffer.t }
 
-  let create_file path header =
-    let channel = open_out path in
+  let create channel header =
     let buffer = Buffer.create 0 in
     output_string channel (Magic.to_string Ff.magic);
     encode_i32 (Int32.of_int Ff.Latest.version) (output_string channel);
@@ -266,7 +270,9 @@ module Io (Ff : File_format) = struct
     Var_int.write (Buffer.length buffer) channel;
     output_string channel (Buffer.contents buffer);
     Buffer.clear buffer;
-    { path; channel; buffer }
+    { channel; buffer }
+
+  let create_file path header = create (open_out path) header
 
   let append_row { channel; buffer; _ } row =
     encode_lrow row (Buffer.add_string buffer);
@@ -277,7 +283,4 @@ module Io (Ff : File_format) = struct
   let flush { channel; _ } = flush channel
   let close { channel; _ } = close_out channel
 
-  let remove { channel; path; _ } =
-    close_out channel;
-    Sys.remove path
 end
