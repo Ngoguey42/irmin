@@ -354,6 +354,173 @@ struct
           Fmt.(list ~sep:comma string)
           !errors
 
+    module Stats = struct
+      type paths = step option list list
+
+      type stat = {
+        length : int * paths;
+        width : int * paths;
+        mp : int * paths;
+      }
+
+      let pp_hash = Irmin.Type.pp Hash.t
+
+      let traverse_inodes commit repo =
+        let visited = Hashtbl.create 100 in
+        let get k =
+          try Hashtbl.find visited k
+          with Not_found ->
+            { length = (0, []); width = (0, []); mp = (0, []) }
+        in
+        let get_root k =
+          try Hashtbl.find visited k
+          with Not_found ->
+            { length = (0, [ [] ]); width = (0, [ [] ]); mp = (0, [ [] ]) }
+        in
+        let max_length = ref 0 in
+        let max_mp = ref 0 in
+        let max_width = ref 0 in
+        let discard k =
+          let stat = get k in
+          if
+            fst stat.length < !max_length
+            && fst stat.mp < !max_mp
+            && fst stat.width < !max_width
+          then Hashtbl.remove visited k
+          else (
+            if fst stat.length > !max_length then max_length := fst stat.length;
+            if fst stat.mp > !max_mp then max_mp := fst stat.mp;
+            if fst stat.width > !max_width then max_width := fst stat.width;
+            Hashtbl.filter_map_inplace
+              (fun _ stat' ->
+                if
+                  fst stat'.mp < !max_mp
+                  && fst stat'.mp < !max_mp
+                  && fst stat'.width < !max_width
+                then None
+                else Some stat')
+              visited)
+        in
+        let pred_node repo k =
+          let stat_k = get_root k in
+          let update_stat x step stat paths =
+            if fst stat > x then stat
+            else
+              let paths = List.map (fun rev_path -> step :: rev_path) paths in
+              if fst stat < x then (x, paths)
+              else
+                let paths' = paths @ snd stat in
+                (fst stat, paths')
+          in
+          (* Update the stats and the paths for node n. *)
+          let visit nb_siblings step n =
+            let stat_n = get n in
+            let length, width =
+              match step with
+              | None ->
+                  (* Do not update length if n is an inode. *)
+                  (stat_k.length, stat_k.width)
+              | Some _ ->
+                  let length = fst stat_k.length + 1 in
+                  let length =
+                    update_stat length step stat_n.length (snd stat_k.length)
+                  in
+                  (* Only update the path, the width is determined when the node
+                     is traversed. *)
+                  let width =
+                    update_stat 0 step stat_n.width (snd stat_k.width)
+                  in
+                  (length, width)
+            in
+            let mp = fst stat_k.mp + nb_siblings in
+            let mp = update_stat mp step stat_n.mp (snd stat_k.mp) in
+            let stat_n' = { length; width; mp } in
+            Hashtbl.replace visited n stat_n'
+          in
+          X.Node.find (X.Repo.node_t repo) k >|= function
+          | None -> Fmt.failwith "hash %a not found" pp_hash k
+          | Some v ->
+              let width = X.Node.Val.length v in
+              let nb_children = X.Node.CA.Val.nb_children v in
+              let visit = visit nb_children in
+              let preds =
+                List.rev_map
+                  (function
+                    | s, `Inode x ->
+                        assert (s = None);
+                        visit s x;
+                        `Node x
+                    | s, `Node x ->
+                        visit s x;
+                        `Node x
+                    | s, `Contents x ->
+                        visit s x;
+                        `Contents x)
+                  (X.Node.CA.Val.pred v)
+              in
+              (* Once we updated its preds we can remove the node from the
+                 table, if it's not a max width. If its a max width, we update
+                 the width. *)
+              if width < !max_width then Hashtbl.remove visited k
+              else (
+                max_width := width;
+                let width = (width, snd stat_k.width) in
+                Hashtbl.replace visited k { stat_k with width });
+              preds
+        in
+        (* We are traversing only one commit. *)
+        let pred_commit repo k =
+          X.Commit.find (X.Repo.commit_t repo) k >|= function
+          | None -> []
+          | Some c ->
+              let node = X.Commit.Val.node c in
+              [ `Node node ]
+        in
+        (* Keep only the contents that have max length, mp or width. *)
+        let pred_contents _repo k =
+          discard k;
+          Lwt.return []
+        in
+        (* We want to discover all paths to a node, so we don't cache nodes
+           during traversal. *)
+        let* () =
+          Repo.breadth_first_traversal ~cache_size:0 ~pred_node ~pred_commit
+            ~pred_contents ~max:[ commit ] repo
+        in
+        let l, w, m =
+          Hashtbl.fold
+            (fun _ stats (l, w, m) ->
+              let l =
+                if fst stats.length = !max_length then
+                  let length = snd stats.length |> List.map List.rev in
+                  List.rev_append length l
+                else l
+              in
+              let w =
+                if fst stats.width = !max_width then
+                  let width = snd stats.width |> List.map List.rev in
+                  List.rev_append width w
+                else w
+              in
+              let m =
+                if fst stats.mp = !max_mp then
+                  let mp = snd stats.mp |> List.map List.rev in
+                  List.rev_append mp m
+                else m
+              in
+              (l, w, m))
+            visited ([], [], [])
+        in
+        let max_length = (!max_length, l) in
+        let max_wide = (!max_width, w) in
+        let max_mp = (!max_mp, m) in
+        Lwt.return { length = max_length; width = max_wide; mp = max_mp }
+
+      let run ~commit repo =
+        let hash = `Commit (Commit.hash commit) in
+        traverse_inodes hash repo
+    end
+
     let sync = X.Repo.sync
     let clear = X.Repo.clear
     let migrate = Migrate.run

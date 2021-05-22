@@ -278,6 +278,78 @@ module Make (M : Maker) = struct
         (term_internal $ setup_log, info ~doc "integrity-check-inodes")
   end
 
+  module Traversal = struct
+    let conf root = Conf.v ~readonly:true ~fresh:false root
+
+    let commit =
+      let open Cmdliner.Arg in
+      value
+      & opt (some string) None
+      & info [ "commit" ] ~doc:"The commit whose underlying tree is traversed."
+          ~docv:"COMMIT"
+
+    let run_versioned_store ~root ~commit (module Store : Versioned_store) =
+      let conf = conf root in
+      let* repo = Store.Repo.v conf in
+      let* commit =
+        match commit with
+        | None ->
+            let* heads = Store.Repo.heads repo in
+            Lwt.return (List.nth_opt heads 0)
+        | Some x -> (
+            match Repr.of_string Store.Hash.t x with
+            | Ok x -> Store.Commit.of_hash repo x
+            | Error (`Msg m) -> Fmt.failwith "Cannot read hash %s" m)
+      in
+      let* () =
+        match commit with
+        | None ->
+            Logs.err (fun l -> l "Error -- no commit found");
+            Lwt.return_unit
+        | Some commit ->
+            let* stat = Store.Stats.run ~commit repo in
+            let pp_step_opt ppf = function
+              | None -> Fmt.pf ppf "-"
+              | Some x -> Fmt.pf ppf "%a" (Irmin.Type.pp Store.step_t) x
+            in
+            let pp_backslash ppf () = Fmt.pf ppf "/" in
+            let pp_path = Fmt.list ~sep:pp_backslash pp_step_opt in
+            let pp_paths = Fmt.list ~sep:Fmt.comma pp_path in
+            let pp_max_wide ppf =
+              let max, widest = stat.width in
+              Fmt.pf ppf "%d, for nodes %a" max pp_paths widest
+            in
+            let pp_max_length ppf =
+              let max, paths = stat.length in
+              Fmt.pf ppf "%d for paths %a" max pp_paths paths
+            in
+            let pp_max_mp ppf =
+              let max, paths = stat.mp in
+              Fmt.pf ppf "%d for paths %a" max pp_paths paths
+            in
+            Logs.app (fun l ->
+                l "Max length: %t\n Max width : %t\n Max MP : %t\n"
+                  pp_max_length pp_max_wide pp_max_mp);
+            Lwt.return_unit
+      in
+      Store.Repo.close repo
+
+    let run ~root ~commit () =
+      match Stat.detect_version ~root with
+      | `V1 -> run_versioned_store ~root ~commit (module Store_V1)
+      | `V2 -> run_versioned_store ~root ~commit (module Store_V2)
+
+    let term_internal =
+      Cmdliner.Term.(
+        const (fun root commit () -> Lwt_main.run (run ~root ~commit ()))
+        $ path
+        $ commit)
+
+    let term =
+      let doc = "Traverse one commit in the store for stats." in
+      Cmdliner.Term.(term_internal $ setup_log, info ~doc "traverse")
+  end
+
   module Cli = struct
     open Cmdliner
 
@@ -288,6 +360,7 @@ module Make (M : Maker) = struct
             Reconstruct_index.term;
             Integrity_check.term;
             Integrity_check_inodes.term;
+            Traversal.term;
           ]) () : empty =
       let default =
         let default_info =

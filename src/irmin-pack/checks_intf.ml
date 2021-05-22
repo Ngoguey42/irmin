@@ -84,6 +84,14 @@ module type S = sig
         with type run := root:string -> heads:string list option -> unit Lwt.t
   end
 
+  (** Traverses the store to get stats on nodes. *)
+  module Traversal : sig
+    include
+      Subcommand
+        with type run :=
+              root:string -> commit:string option -> unit -> unit Lwt.t
+  end
+
   val cli :
     ?terms:(unit Cmdliner.Term.t * Cmdliner.Term.info) list -> unit -> empty
   (** Run a [Cmdliner] binary containing tools for running offline checks.

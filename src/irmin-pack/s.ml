@@ -79,6 +79,13 @@ module type S = sig
     ([> `Msg of string ], [> `Msg of string ]) result Lwt.t
 
   val reconstruct_index : ?output:string -> Irmin.config -> unit
+
+  module Stats : sig
+    type paths = step option list list
+    type stat = { length : int * paths; width : int * paths; mp : int * paths }
+
+    val run : commit:commit -> repo -> stat Lwt.t
+  end
 end
 
 module type Maker = sig
