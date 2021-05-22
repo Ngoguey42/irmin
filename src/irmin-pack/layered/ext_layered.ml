@@ -546,7 +546,8 @@ struct
         | Some v ->
             List.rev_map
               (function
-                | `Inode x -> `Node x | (`Node _ | `Contents _) as x -> x)
+                | _, `Inode x -> `Node x
+                | _, ((`Node _ | `Contents _) as x) -> x)
               (X.Node.CA.Val.pred v)
 
       let always_false _ = false
