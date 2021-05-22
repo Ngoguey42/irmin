@@ -129,6 +129,8 @@
     `Irmin_pack.Pack.File` into `Irmin_pack.Content_addressable.Maker`
     (#1377, @samoht)
   - Moved `Irmin_pack.Store.Atomic_write` into its own module (#1378, @samoht)
+  - Added a `traverse` command to `irmin-fsck` to output stats on the graph
+    under a specified commit (#1391, @icristescu).
 
 ## 2.6.0 (2021-04-13)
 

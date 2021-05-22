@@ -17,6 +17,9 @@ COMMANDS
        stat
            Print high-level statistics about the store.
 
+       traverse
+           Traverse one commit in the store for stats.
+
 OPTIONS
        --help[=FMT] (default=auto)
            Show this help in format FMT. The value FMT must be one of `auto',

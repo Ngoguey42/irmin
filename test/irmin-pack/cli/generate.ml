@@ -16,46 +16,98 @@
 
 open Lwt.Syntax
 
-let data_dir = "data/layered_pack_upper"
-
-let rm_dir () =
+let rm_dir data_dir =
   if Sys.file_exists data_dir then (
     let cmd = Printf.sprintf "rm -rf %s" data_dir in
     Fmt.epr "exec: %s\n%!" cmd;
     let _ = Sys.command cmd in
     ())
 
-module Conf = struct
-  let entries = 32
-  let stable_hash = 256
+module Layered = struct
+  let data_dir = "data/layered_pack_upper"
+
+  module Conf = struct
+    let entries = 32
+    let stable_hash = 256
+  end
+
+  module Maker = Irmin_pack_layered.Maker (Conf)
+
+  module Store =
+    Maker.Make (Irmin.Metadata.None) (Irmin.Contents.String)
+      (Irmin.Path.String_list)
+      (Irmin.Branch.String)
+      (Irmin.Hash.BLAKE2B)
+
+  let config root =
+    let conf = Irmin_pack.config ~readonly:false ~fresh:true root in
+    Irmin_pack_layered.config ~conf ~with_lower:true ()
+
+  let info = Store.Info.empty
+
+  let create_store () =
+    rm_dir data_dir;
+    let* repo = Store.Repo.v (config data_dir) in
+    let* _t = Store.master repo in
+    let* tree = Store.Tree.add Store.Tree.empty [ "a"; "b"; "c" ] "x1" in
+    let* c = Store.Commit.v repo ~info ~parents:[] tree in
+    let* () = Store.freeze ~max_lower:[ c ] ~max_upper:[] repo in
+    let* () = Store.Private_layer.wait_for_freeze repo in
+    let* tree = Store.Tree.add tree [ "a"; "b"; "d" ] "x2" in
+    let hash = Store.Commit.hash c in
+    let* c3 = Store.Commit.v repo ~info ~parents:[ hash ] tree in
+    let* () = Store.Branch.set repo "master" c3 in
+    Store.Repo.close repo
 end
 
-module Maker = Irmin_pack_layered.Maker (Conf)
+module Simple = struct
+  let data_dir = "data/pack"
 
-module Store =
-  Maker.Make (Irmin.Metadata.None) (Irmin.Contents.String)
-    (Irmin.Path.String_list)
-    (Irmin.Branch.String)
-    (Irmin.Hash.BLAKE2B)
+  module Conf = struct
+    let entries = 2
+    let stable_hash = 3
+  end
 
-let config root =
-  let conf = Irmin_pack.config ~readonly:false ~fresh:true root in
-  Irmin_pack_layered.config ~conf ~with_lower:true ()
+  module Maker =
+    Irmin_pack.Maker_ext
+      (struct
+        let version = `V2
+      end)
+      (Conf)
+      (Irmin.Private.Node)
+      (Irmin.Private.Commit)
 
-let info = Store.Info.empty
+  module Store =
+    Maker.Make (Irmin.Metadata.None) (Irmin.Contents.String)
+      (Irmin.Path.String_list)
+      (Irmin.Branch.String)
+      (Irmin.Hash.BLAKE2B)
 
-let create_store () =
-  rm_dir ();
-  let* repo = Store.Repo.v (config data_dir) in
-  let* _t = Store.master repo in
-  let* tree = Store.Tree.add Store.Tree.empty [ "a"; "b"; "c" ] "x1" in
-  let* c = Store.Commit.v repo ~info ~parents:[] tree in
-  let* () = Store.freeze ~max_lower:[ c ] ~max_upper:[] repo in
-  let* () = Store.Private_layer.wait_for_freeze repo in
-  let* tree = Store.Tree.add tree [ "a"; "b"; "d" ] "x2" in
-  let hash = Store.Commit.hash c in
-  let* c3 = Store.Commit.v repo ~info ~parents:[ hash ] tree in
-  let* () = Store.Branch.set repo "master" c3 in
-  Store.Repo.close repo
+  let config root = Irmin_pack.config ~readonly:false ~fresh:true root
+  let info = Store.Info.empty
 
-let () = Lwt_main.run (create_store ())
+  let create_store () =
+    rm_dir data_dir;
+    let* rw = Store.Repo.v (config data_dir) in
+    let* tree =
+      Store.Tree.add Store.Tree.empty [ "a"; "b1"; "c1"; "d1"; "e1" ] "x1"
+    in
+    let* tree = Store.Tree.add tree [ "a"; "b1"; "c1"; "d2"; "e2" ] "x2" in
+    let* tree = Store.Tree.add tree [ "a"; "b1"; "c1"; "d3"; "e3" ] "x2" in
+    let* tree = Store.Tree.add tree [ "a"; "b2"; "c2"; "e3" ] "x2" in
+    let* c1 = Store.Commit.v rw ~parents:[] ~info tree in
+
+    let* tree = Store.Tree.add tree [ "a"; "b3" ] "x3" in
+    let* c2 = Store.Commit.v rw ~parents:[ Store.Commit.hash c1 ] ~info tree in
+
+    let* tree = Store.Tree.remove tree [ "a"; "b1"; "c1" ] in
+    let* _ = Store.Commit.v rw ~parents:[ Store.Commit.hash c2 ] ~info tree in
+
+    Store.Repo.close rw
+end
+
+let generate () =
+  let* () = Layered.create_store () in
+  Simple.create_store ()
+
+let () = Lwt_main.run (generate ())
