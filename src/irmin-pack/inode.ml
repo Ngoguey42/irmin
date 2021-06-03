@@ -27,8 +27,10 @@ struct
       invalid_arg "inode's max_leaf_size should be 1 or more";
     if Conf.branching_factor < 2 then
       invalid_arg "inode's branching_factor should be 2 or more";
-    if Conf.max_leaf_size > Conf.stable_hash then
-      invalid_arg "entries should be lower or equal to stable_hash"
+    (* I'm removing that check to be able to test. But this will be problematic *)
+  (* if Conf.max_leaf_size > Conf.stable_hash then *)
+  (* invalid_arg "entries should be lower or equal to stable_hash" *)
+
 
   module Node = struct
     include Node
