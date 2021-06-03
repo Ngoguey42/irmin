@@ -668,7 +668,9 @@ struct
           *)
           t.stable
 
-    let check_write_op_supported _t = ()
+    let check_write_op_supported _t =
+      ignore is_root;
+      ()
       (* if not @@ is_root t then *)
         (* failwith "Cannot perform operation on non-root inode value." *)
 
