@@ -17,7 +17,7 @@ type config = {
   ncommits_trace : int;
   store_dir : string;
   path_conversion : [ `None | `V1 | `V0_and_v1 | `V0 ];
-  inode_config : int * int;
+  inode_config : int * int * int;
   store_type : [ `Pack | `Pack_layered ];
   commit_data_file : string;
   artefacts_dir : string;

@@ -87,7 +87,8 @@ let with_progress_bar ~message ~n ~unit =
   Progress_unix.with_reporters bar
 
 module Conf = struct
-  let entries = 32
+  let max_leaf_size = 32
+  let branching_factor = 32
   let stable_hash = 256
 end
 

@@ -346,7 +346,7 @@ module Make (Store : Store) = struct
   let run ext_config config =
     let check_hash =
       config.path_conversion = `None
-      && config.inode_config = (32, 256)
+      && config.inode_config = (32, 32, 256)
       && config.empty_blobs = false
     in
     Logs.app (fun l ->
@@ -360,7 +360,7 @@ module Make (Store : Store) = struct
     prepare_artefacts_dir config.artefacts_dir;
     let stat_path = Filename.concat config.artefacts_dir "stat_trace.repr" in
     let c =
-      let entries, stable_hash = config.inode_config in
+      let max_leaf_size, branching_factor, stable_hash = config.inode_config in
       Trace_definitions.Stat_trace.
         {
           setup =
@@ -369,7 +369,7 @@ module Make (Store : Store) = struct
                 path_conversion = config.path_conversion;
                 artefacts_dir = config.artefacts_dir;
               };
-          inode_config = (entries, entries, stable_hash);
+          inode_config = (max_leaf_size, branching_factor, stable_hash);
           store_type = config.store_type;
         }
     in

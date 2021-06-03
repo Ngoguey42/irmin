@@ -27,7 +27,7 @@ type config = {
   nlarge_trees : int;
   store_dir : string;
   path_conversion : [ `None | `V1 | `V0_and_v1 | `V0 ];
-  inode_config : int * int;
+  inode_config : int * int * int;
   store_type : [ `Pack | `Pack_layered ];
   freeze_commit : int;
   commit_data_file : string;
@@ -50,8 +50,8 @@ module type Store = sig
   val create_repo : store_config -> (Repo.t * on_commit * on_end * pp) Lwt.t
 end
 
-let pp_inode_config ppf (entries, stable_hash) =
-  Format.fprintf ppf "[%d, %d]" entries stable_hash
+let pp_inode_config ppf (max_leaf_size, branching_factor, stable_hash) =
+  Format.fprintf ppf "[%d, %d, %d]" max_leaf_size branching_factor stable_hash
 
 let pp_store_type ppf = function
   | `Pack -> Format.fprintf ppf "[pack store]"
@@ -162,7 +162,8 @@ module Bench_suite (Store : Store) = struct
 end
 
 module Make_store_layered (Conf : sig
-  val entries : int
+  val max_leaf_size : int
+  val branching_factor : int
   val stable_hash : int
 end) =
 struct
@@ -203,7 +204,8 @@ struct
 end
 
 module Make_store_pack (Conf : sig
-  val entries : int
+  val max_leaf_size : int
+  val branching_factor : int
   val stable_hash : int
 end) =
 struct
@@ -236,10 +238,11 @@ module type B = sig
 end
 
 let store_of_config config =
-  let entries, stable_hash = config.inode_config in
+  let max_leaf_size, branching_factor, stable_hash = config.inode_config in
   let module Conf = struct
-    let entries = entries
-    let stable_hash = stable_hash
+      let max_leaf_size = max_leaf_size
+      let branching_factor = branching_factor
+      let stable_hash = stable_hash
   end in
   match config.store_type with
   | `Pack -> (module Bench_suite (Make_store_pack (Conf)) : B)
@@ -255,76 +258,12 @@ let suite : suite_elt list =
   [
     {
       mode = `Read_trace;
-      speed = `Quick;
-      run =
-        (fun config ->
-          let config =
-            { config with inode_config = (32, 256); store_type = `Pack }
-          in
-          let (module Store) = store_of_config config in
-          Store.run_read_trace config);
-    };
-    {
-      mode = `Read_trace;
-      speed = `Slow;
-      run =
-        (fun config ->
-          let config =
-            { config with inode_config = (32, 256); store_type = `Pack }
-          in
-          let (module Store) = store_of_config config in
-          Store.run_read_trace config);
-    };
-    {
-      mode = `Chains;
-      speed = `Quick;
-      run =
-        (fun config ->
-          let config =
-            { config with inode_config = (32, 256); store_type = `Pack }
-          in
-          let (module Store) = store_of_config config in
-          Store.run_chains config);
-    };
-    {
-      mode = `Chains;
-      speed = `Slow;
-      run =
-        (fun config ->
-          let config =
-            { config with inode_config = (2, 5); store_type = `Pack }
-          in
-          let (module Store) = store_of_config config in
-          Store.run_chains config);
-    };
-    {
-      mode = `Large;
-      speed = `Quick;
-      run =
-        (fun config ->
-          let config =
-            { config with inode_config = (32, 256); store_type = `Pack }
-          in
-          let (module Store) = store_of_config config in
-          Store.run_large config);
-    };
-    {
-      mode = `Large;
-      speed = `Slow;
-      run =
-        (fun config ->
-          let config =
-            { config with inode_config = (2, 5); store_type = `Pack }
-          in
-          let (module Store) = store_of_config config in
-          Store.run_large config);
-    };
-    {
-      mode = `Read_trace;
       speed = `Custom;
       run =
         (fun config ->
           let (module Store) = store_of_config config in
+          ignore Store.run_large;
+          ignore Store.run_chains;
           Store.run_read_trace config);
     };
   ]
@@ -416,7 +355,7 @@ let mode =
 
 let inode_config =
   let doc = Arg.info ~doc:"Inode config" [ "inode-config" ] in
-  Arg.(value @@ opt (pair int int) (32, 256) doc)
+  Arg.(value @@ opt (t3 int int int) (32, 32, 256) doc)
 
 let store_type =
   let mode = [ ("pack", `Pack); ("pack-layered", `Pack_layered) ] in

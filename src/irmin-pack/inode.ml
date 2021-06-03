@@ -23,7 +23,11 @@ module Make_internal
     (Node : Irmin.Private.Node.S with type hash = H.t) =
 struct
   let () =
-    if Conf.entries > Conf.stable_hash then
+    if Conf.max_leaf_size < 1 then
+      invalid_arg "inode's max_leaf_size should be 1 or more";
+    if Conf.branching_factor < 2 then
+      invalid_arg "inode's branching_factor should be 2 or more";
+    if Conf.max_leaf_size > Conf.stable_hash then
       invalid_arg "entries should be lower or equal to stable_hash"
 
   module Node = struct
@@ -601,7 +605,7 @@ struct
             check_entries t l;
             Values (StepMap.of_list (List.map Concrete.of_entry l))
         | Concrete.Tree tr ->
-            let entries = Array.make Conf.entries None in
+            let entries = Array.make Conf.branching_factor None in
             check_pointers t tr.pointers;
             List.iter
               (fun { Concrete.index; pointer; tree } ->
@@ -680,7 +684,7 @@ struct
           { hash; stable = true; v = t.v }
 
     let hash_key = Irmin.Type.(unstage (short_hash step_t))
-    let index ~depth k = abs (hash_key ~seed:depth k) mod Conf.entries
+    let index ~depth k = abs (hash_key ~seed:depth k) mod Conf.branching_factor
 
     (** This function shouldn't be called with the [Total] layout. In the
         future, we could add a polymorphic variant to the GADT parameter to
@@ -692,7 +696,7 @@ struct
             let vs = StepMap.of_list vs in
             Values vs
         | Tree t ->
-            let entries = Array.make Conf.entries None in
+            let entries = Array.make Conf.branching_factor None in
             let ptr_of_hash = Ptr.of_hash layout in
             List.iter
               (fun { Bin.index; hash } ->
@@ -747,12 +751,12 @@ struct
             if replace then StepMap.cardinal vs else StepMap.cardinal vs + 1
           in
           let t =
-            if length <= Conf.entries then values layout (StepMap.add s v vs)
+            if length <= Conf.max_leaf_size then values layout (StepMap.add s v vs)
             else
               let vs = StepMap.bindings (StepMap.add s v vs) in
               let empty =
                 tree layout
-                  { length = 0; depth; entries = Array.make Conf.entries None }
+                  { length = 0; depth; entries = Array.make Conf.branching_factor None }
               in
               let aux t (s, v) =
                 (add [@tailcall]) layout ~depth ~copy:false ~replace t s v
@@ -797,7 +801,7 @@ struct
           k t
       | Tree t -> (
           let len = t.length - 1 in
-          if len <= Conf.entries then
+          if len <= Conf.max_leaf_size then
             let vs =
               list_tree layout ~offset:0 ~length:t.length (empty_acc t.length) t
             in
@@ -832,7 +836,7 @@ struct
     let v l =
       let len = List.length l in
       let t =
-        if len <= Conf.entries then of_values Total l
+        if len <= Conf.max_leaf_size then of_values Total l
         else
           let aux acc (s, v) = add Total ~copy:false acc s v in
           List.fold_left aux (empty Total) l

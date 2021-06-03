@@ -69,8 +69,9 @@ module Vx = struct
 end
 
 module Cx = struct
+  let max_leaf_size = 0
+  let branching_factor = 0
   let stable_hash = 0
-  let entries = 0
 end
 
 (* Enforce that {!KV} is a sub-type of {!Irmin.KV_maker}. *)

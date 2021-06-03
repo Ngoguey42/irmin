@@ -31,7 +31,8 @@ module Info (I : Irmin.Info.S) : sig
 end
 
 module Conf : sig
-  val entries : int
+  val max_leaf_size : int
+  val branching_factor : int
   val stable_hash : int
 end
 
