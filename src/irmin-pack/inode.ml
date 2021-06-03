@@ -668,9 +668,9 @@ struct
           *)
           t.stable
 
-    let check_write_op_supported t =
-      if not @@ is_root t then
-        failwith "Cannot perform operation on non-root inode value."
+    let check_write_op_supported _t = ()
+      (* if not @@ is_root t then *)
+        (* failwith "Cannot perform operation on non-root inode value." *)
 
     let stabilize layout t =
       if t.stable then t
