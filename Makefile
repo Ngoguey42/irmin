@@ -13,11 +13,11 @@ bench-with-trace-replay:
 	@echo test 1>&2
 	@mount 1>&2 || true
 	@echo test 1>&2
-	@ls -lRa /home/opam/bench-dir/bench-data 1>&2 || true
+	@ls -lRa /home/opam/bench-dir/current-bench-data 1>&2 || true
 	@echo test 1>&2
 	@ls -la 1>&2 || true
 	@echo test 1>&2
-	@dune exec -- ./bench/irmin-pack/tree.exe --mode trace test/irmin-bench/data/tezos_actions_1commit.repr --ncommits-trace 12000 --artefacts ./cb_artefacts 1>&2 || true
+	@dune exec -- ./bench/irmin-pack/tree.exe --mode trace /home/opam/bench-dir/current-bench-data/mirage/irmin/tezos_actions_1commit.repr --ncommits-trace 12000 --artefacts ./cb_artefacts 1>&2 || true
 	@dune exec -- ./bench/irmin-pack/trace_stats.exe cb ./cb_artefacts/boostrap_summary.json
 	@rm -rf ./cb_artefacts
 
