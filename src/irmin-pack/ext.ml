@@ -146,15 +146,18 @@ struct
           let fresh = Conf.fresh config in
           let lru_size = Conf.lru_size config in
           let readonly = Conf.readonly config in
+          Printf.eprintf "RO??? %b\n%!" readonly;
           let log_size = Conf.index_log_size config in
           let throttle = Conf.merge_throttle config in
           let f = ref (fun () -> ()) in
+          Printf.eprintf "aaa\n%!";
           let index =
             Index.v
               ~flush_callback:(fun () -> !f ())
                 (* backpatching to add pack flush before an index flush *)
               ~fresh ~readonly ~throttle ~log_size root
           in
+          Printf.eprintf "bbb\n%!";
           let* contents =
             Contents.CA.v ~fresh ~readonly ~lru_size ~index root
           in

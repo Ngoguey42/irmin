@@ -215,12 +215,61 @@ struct
   module Store = Maker.Make (Metadata) (Contents) (Path) (Branch) (Hash)
 
   let create_repo config =
-    let conf = Irmin_pack.config ~readonly:false ~fresh:true config.store_dir in
-    let* repo = Store.Repo.v conf in
-    let on_commit _ _ = Lwt.return_unit in
-    let on_end () = Lwt.return_unit in
-    let pp _ = () in
-    Lwt.return (repo, on_commit, on_end, pp)
+    if true then (
+      Printf.eprintf "salut, go for RO:true\n%!";
+      let conf =
+        Irmin_pack.config ~readonly:true ~fresh:false config.store_dir
+      in
+      let* repo = Store.Repo.v conf in
+      Printf.eprintf "getting commit\n%!";
+
+      let* commit =
+        Repr.of_string Store.Hash.t
+          "CoVs31pKopFNpiRFe4VVBp5rvg6N5J53om5ARzGwS3R4SjqvTmp6"
+          (* "CoV8SQumiVU9saiu3FVNeDNewJaJH8yWdsGF3WLdsRr2P9S7MzCj" *)
+        |> Result.get_ok
+        |> Store.Commit.of_hash repo
+      in
+
+      Printf.eprintf "getting commit\n%!";
+      let commit = Option.get commit in
+      Printf.eprintf "got commit\n%!";
+      let open Store.Stats in
+      let* stat = Store.Stats.run ~commit repo in
+      let pp_step_opt ppf = function
+        | None -> Fmt.pf ppf "-"
+        | Some x -> Fmt.pf ppf "%a" (Irmin.Type.pp Store.step_t) x
+      in
+      let pp_backslash ppf () = Fmt.pf ppf "/" in
+      let pp_path = Fmt.list ~sep:pp_backslash pp_step_opt in
+      let pp_paths = Fmt.list ~sep:Fmt.comma pp_path in
+      let pp_max_wide ppf =
+        let max, widest = stat.width in
+        Fmt.pf ppf "%d, for nodes %a" max pp_paths widest
+      in
+      let pp_max_length ppf =
+        let max, paths = stat.length in
+        Fmt.pf ppf "%d for paths %a" max pp_paths paths
+      in
+      let pp_max_mp ppf =
+        let max, paths = stat.mp in
+        Fmt.pf ppf "%d for paths %a" max pp_paths paths
+      in
+      Fmt.pr "Max length: %t\n Max width : %t\n Max MP : %t\n%!" pp_max_length
+        pp_max_wide pp_max_mp;
+
+      failwith "siuperA")
+    else (
+      Printf.eprintf "lola\n%!";
+      let conf =
+        Irmin_pack.config ~readonly:false ~fresh:true config.store_dir
+      in
+      let* repo = Store.Repo.v conf in
+      Printf.eprintf "ok\n%!";
+      let on_commit _ _ = Lwt.return_unit in
+      let on_end () = Lwt.return_unit in
+      let pp _ = () in
+      Lwt.return (repo, on_commit, on_end, pp))
 
   include Store
 end
@@ -373,7 +422,7 @@ let main () ncommits ncommits_trace suite_filter inode_config store_type
   in
   Printexc.record_backtrace true;
   Random.self_init ();
-  FSHelper.rm_dir config.store_dir;
+  (* FSHelper.rm_dir config.store_dir; *)
   let suite = get_suite suite_filter in
   let run_benchmarks () = Lwt_list.map_s (fun b -> b.run config) suite in
   let results =

@@ -305,6 +305,9 @@ module Make (Store : Store) = struct
           let* () = exec_mem_tree t stats n i keys b in_ctx_id in
           aux tl (i + 1)
       | [ Commit op ] ->
+         Printf.eprintf "commit!\n%!";
+         Printf.eprintf "%s\n%!" (unscope op.hash);
+         Printf.eprintf "\n%!";
           exec_commit t stats repo op.hash op.date op.message op.parents
             op.in_ctx_id check_hash
       | Commit _ :: _ | [] ->

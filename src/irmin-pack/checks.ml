@@ -290,17 +290,23 @@ module Make (M : Maker) = struct
 
     let run_versioned_store ~root ~commit (module Store : Versioned_store) =
       let conf = conf root in
+      Printf.eprintf "a\n%!";
       let* repo = Store.Repo.v conf in
+      Printf.eprintf "b\n%!";
       let* commit =
         match commit with
         | None ->
+           Printf.eprintf "ici?\n%!";
             let* heads = Store.Repo.heads repo in
+            Printf.eprintf "oula\n%!";
             Lwt.return (List.nth_opt heads 0)
         | Some x -> (
+          Printf.eprintf "pala...\n%!";
             match Repr.of_string Store.Hash.t x with
             | Ok x -> Store.Commit.of_hash repo x
             | Error (`Msg m) -> Fmt.failwith "Cannot read hash %s" m)
       in
+      Printf.eprintf "c\n%!";
       let* () =
         match commit with
         | None ->
