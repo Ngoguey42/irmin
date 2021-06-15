@@ -53,7 +53,7 @@ module Make (K : Irmin.Hash.S) = struct
   end
 
   module Stats = Index.Stats
-  module Index = Index_unix.Make (Key) (Val) (Index.Cache.Unbounded)
+  module Index = Btree_index.Make (Key) (Val)
   include Index
 
   (** Implicit caching of Index instances. TODO: Require the user to pass Pack
