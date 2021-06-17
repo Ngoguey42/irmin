@@ -1,5 +1,5 @@
 (*
- * Copyright (c) 2013-2019 Thomas Gazagnaire <thomas@gazagnaire.org>
+ * Copyright (c) 2018-2021 Tarides <contact@tarides.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -21,8 +21,10 @@ module Config = struct
   let stable_hash = 3
 end
 
-module KV =
-  Irmin_pack.KV (Irmin_pack.Version.V1) (Config) (Irmin.Contents.String)
+module KV = struct
+  module Maker = Irmin_pack.KV (Irmin_pack.Version.V2) (Config)
+  include Maker.Make (Irmin.Contents.String)
+end
 
 module Bench = Irmin_bench.Make (KV)
 
