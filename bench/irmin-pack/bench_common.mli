@@ -26,10 +26,6 @@ val with_progress_bar :
 
 val random_blob : unit -> bytes
 
-module Info (I : Irmin.Info.S) : sig
-  val f : I.f
-end
-
 module Conf : sig
   val entries : int
   val stable_hash : int

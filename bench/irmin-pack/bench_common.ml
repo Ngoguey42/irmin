@@ -91,10 +91,6 @@ module Conf = struct
   let stable_hash = 256
 end
 
-module Info (I : Irmin.Info.S) = struct
-  let f () = I.v ~author:"tests" ~message:"commit" 0L
-end
-
 module FSHelper = struct
   let file f =
     try (Unix.stat f).st_size with Unix.Unix_error (Unix.ENOENT, _, _) -> 0

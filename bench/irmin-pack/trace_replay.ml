@@ -263,7 +263,7 @@ module Make (Store : Store) = struct
       (* in tezos commits call Tree.list first for the unshallow operation *)
       Store.Tree.list tree []
     in
-    let info = Store.Info.v ~author:"Tezos" ~message date in
+    let info = Irmin.Info.v ~author:"Tezos" message ~date in
     let* commit = Store.Commit.v repo ~info ~parents:parents_store tree in
     let+ () = Stat_collector.commit_end stats tree in
     Store.Tree.clear tree;

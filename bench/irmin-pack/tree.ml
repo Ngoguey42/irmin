@@ -69,79 +69,18 @@ module Benchmark = struct
   let pp_results ppf result =
     Format.fprintf ppf "Total time: %f@\nSize on disk: %d M" result.time
       result.size
+
+  let () =
+    ignore (pp_inode_config, pp_store_type, run, pp_results)
+
 end
 
 module Hash = Irmin.Hash.SHA1
 
 module Bench_suite (Store : Store) = struct
-  module Info = Info (Store.Info)
+  (* module Info = Info (Store.Info) *)
 
-  let init_commit repo =
-    Store.Commit.v repo ~info:(Info.f ()) ~parents:[] Store.Tree.empty
-
-  module Trees = Generate_trees (Store)
   module Trace_replay = Trace_replay.Make (Store)
-
-  let checkout_and_commit repo prev_commit f =
-    Store.Commit.of_hash repo prev_commit >>= function
-    | None -> Lwt.fail_with "commit not found"
-    | Some commit ->
-        let tree = Store.Commit.tree commit in
-        let* tree = f tree in
-        Store.Commit.v repo ~info:(Info.f ()) ~parents:[ prev_commit ] tree
-
-  let add_commits ~message repo ncommits on_commit on_end f () =
-    with_progress_bar ~message ~n:ncommits ~unit:"commits" @@ fun prog ->
-    let* c = init_commit repo in
-    let rec aux c i =
-      if i >= ncommits then on_end ()
-      else
-        let* c' = checkout_and_commit repo (Store.Commit.hash c) f in
-        let* () = on_commit i (Store.Commit.hash c') in
-        prog Int64.one;
-        aux c' (i + 1)
-    in
-    aux c 0
-
-  let run_large config =
-    reset_stats ();
-    let* repo, on_commit, on_end, repo_pp = Store.create_repo config in
-    let* result, () =
-      Trees.add_large_trees config.width config.nlarge_trees
-      |> add_commits ~message:"Playing large mode" repo config.ncommits
-           on_commit on_end
-      |> Benchmark.run config
-    in
-    let+ () = Store.Repo.close repo in
-    fun ppf ->
-      Format.fprintf ppf
-        "Large trees mode on inode config %a, %a: %d commits, each consisting \
-         of %d large trees of %d entries@\n\
-         %t@\n\
-         %a"
-        pp_inode_config config.inode_config pp_store_type config.store_type
-        config.ncommits config.nlarge_trees config.width repo_pp
-        Benchmark.pp_results result
-
-  let run_chains config =
-    reset_stats ();
-    let* repo, on_commit, on_end, repo_pp = Store.create_repo config in
-    let* result, () =
-      Trees.add_chain_trees config.depth config.nchain_trees
-      |> add_commits ~message:"Playing chain mode" repo config.ncommits
-           on_commit on_end
-      |> Benchmark.run config
-    in
-    let+ () = Store.Repo.close repo in
-    fun ppf ->
-      Format.fprintf ppf
-        "Chain trees mode on inode config %a, %a: %d commits, each consisting \
-         of %d chains of depth %d@\n\
-         %t@\n\
-         %a"
-        pp_inode_config config.inode_config pp_store_type config.store_type
-        config.ncommits config.nchain_trees config.depth repo_pp
-        Benchmark.pp_results result
 
   let run_read_trace config =
     let replay_config : Irmin_traces.Trace_replay.config =
@@ -160,6 +99,12 @@ module Bench_suite (Store : Store) = struct
       }
     in
     Trace_replay.run config replay_config
+
+  let run_large _ =
+    assert false
+  let run_chains _ =
+    assert false
+
 end
 
 module Make_store_layered (Conf : sig
@@ -216,8 +161,10 @@ module Make_basic
       val stable_hash : int
     end) =
 struct
-  module Maker = Impl (Node) (Commit) (Conf)
-  module Store = Maker.Make (Metadata) (Contents) (Path) (Branch) (Hash)
+  (* module Maker = Impl (Node) (Commit) (Conf)
+   * module Store = Maker.Make (Metadata) (Contents) (Path) (Branch) (Hash) *)
+  (* module Maker = Impl (Node) (Commit) (Conf) *)
+  module Store = Impl (Node) (Commit) (Conf) (Metadata) (Contents) (Path) (Branch) (Hash)
 
   type store_config = config
 
@@ -232,8 +179,6 @@ struct
   include Store
 end
 
-module Make_store_mem = Make_basic (Irmin_pack_mem.Maker)
-
 module Make_store_pack =
   Make_basic
     ((functor
@@ -241,7 +186,9 @@ module Make_store_pack =
        (Commit : Irmin.Private.Commit.Maker)
        (C : Irmin_pack.Conf.S)
        ->
-       Irmin_pack.Maker_ext (Irmin_pack.Version.V1) (C) (Node) (Commit)))
+       Irmin_pack.Make_ext (Irmin_pack.Version.V1) (C) (Node) (Commit)))
+
+module Make_store_mem = Make_store_pack
 
 module type B = sig
   val run_large : config -> (Format.formatter -> unit) Lwt.t
