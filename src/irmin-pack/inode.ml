@@ -681,6 +681,7 @@ struct
         future, we could add a polymorphic variant to the GADT parameter to
         enfoce that. *)
     let of_bin layout t =
+      (* Printf.eprintf "of_bin\n%!"; *)
       let v =
         match t.Bin.v with
         | Bin.Values vs ->
@@ -695,7 +696,24 @@ struct
               t.entries;
             Tree { depth = t.Bin.depth; length = t.length; entries }
       in
-      { hash = t.Bin.hash; stable = t.Bin.stable; v }
+      let t = { hash = t.Bin.hash; stable = t.Bin.stable; v } in
+      (* let () =
+       *   if t.stable then ()
+       *   else (
+       *     (\* Printf.eprintf "Rehashing using Bin\n%!"; *\)
+       *     let rehash = Bin.V.hash (to_bin_v layout v) in
+       *     assert (hash_equal (Lazy.force t.hash) rehash)
+       *
+       *   )
+       * in *)
+      (* let rehash =
+       *   if t.stable then
+       *     let vs = list layout t in
+       *     Node.hash (Node.v vs)
+       *   else Bin.V.hash (to_bin_v layout v)
+       * in
+       * assert (hash_equal (Lazy.force t.hash) rehash); *)
+      t
 
     let empty : 'a. 'a layout -> 'a t =
      fun _ ->
@@ -899,6 +917,12 @@ struct
       check_lower t
 
     let is_tree t = match t.v with Tree _ -> true | Values _ -> false
+
+    let rehash layout t =
+      if t.stable then
+        let vs = list layout t in
+        Node.hash (Node.v vs)
+      else Bin.V.hash (to_bin_v layout t.v)
   end
 
   module Raw = struct
@@ -960,6 +984,7 @@ struct
     exception Exit of [ `Msg of string ]
 
     let decode_bin ~dict ~hash t off : int * t =
+      (* Printf.eprintf "decode_bin\n%!"; *)
       let off, i = decode_compress t off in
       let step : Compress.name -> T.step = function
         | Direct n -> n
@@ -1091,6 +1116,7 @@ struct
       apply t { f }
 
     let of_raw find' v =
+      (* Printf.eprintf "of_raw\n%!"; *)
       let rec find h =
         match find' h with None -> None | Some v -> Some (I.of_bin layout v)
       and layout = I.Partial find in
@@ -1100,6 +1126,7 @@ struct
     let stable t = apply t { f = (fun _ v -> I.stable v) }
     let length t = apply t { f = (fun _ v -> I.length v) }
     let index = I.index
+    let rehash t = apply t { f = (fun layout v -> I.rehash layout v) }
 
     let integrity_check t =
       let f layout v =

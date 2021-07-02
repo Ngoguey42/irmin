@@ -120,4 +120,6 @@ module Make (V : Version.S) (IO : IO.S) : S = struct
       t.open_instances <- t.open_instances + 1;
       true)
     else false
+
+  let bindings { index; _ } = Hashtbl.to_seq index |> List.of_seq
 end

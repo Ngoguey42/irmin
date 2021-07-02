@@ -234,5 +234,19 @@ struct
     end)
 
     let reconstruct_index = Reconstruct_index.run
+
+    module Brute_force_integrity_report =
+    Brute_force_integrity_report.Make (struct
+      module Version = V
+      module Hash = H
+      module Index = Index
+      module Inode = X.Node.CA
+      module Inode_internal = X.Node.CA.Inter
+      module Dict = Dict
+      module Contents = X.Contents.Pack_value
+      module Commit = X.Commit.Pack_value
+    end)
+
+    let brute_force_integrity_report = Brute_force_integrity_report.run
   end
 end

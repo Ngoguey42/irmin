@@ -69,6 +69,7 @@ module type Internal = sig
     val stable : t -> bool
     val length : t -> int
     val index : depth:int -> step -> int
+    val rehash : t -> hash
 
     val integrity_check : t -> bool
     (** Checks the integrity of an inode. *)

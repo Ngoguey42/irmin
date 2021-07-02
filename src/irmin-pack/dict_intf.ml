@@ -28,6 +28,7 @@ module type S = sig
   val clear : t -> unit
   val close : t -> unit
   val valid : t -> bool
+  val bindings : t -> (int * string) list
 end
 
 module type Sigs = sig
