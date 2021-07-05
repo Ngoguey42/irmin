@@ -67,6 +67,8 @@ end = struct
       | None, None -> `Empty
   end
 
+  let _ = ignore (Offsetmap.locate, Index.value_t, key_equal)
+
   module Offsetgraph = Graph.Imperative.Digraph.Concrete (struct
     type t = offset
 
@@ -145,7 +147,7 @@ end = struct
               ~buffer_off
           with
           | entry ->
-              let off', entry_len, kind, _, _ = entry in
+              let _, entry_len, _, _, _ = entry in
               let entry_lenL = Int63.of_int entry_len in
               aux ~buffer_off:(buffer_off + entry_len) (off ++ entry_lenL)
                 (f acc entry)
@@ -321,15 +323,14 @@ end = struct
     let run_duration = Mtime_clock.counter () in
     let root = Conf.root config in
     let log_size = Conf.index_log_size config in
-    Log.app (fun f ->
-        f "Beginning index reconstruction with parameters: { log_size = %d }"
-          log_size);
-    (* let index = Index.v ~fresh:true ~readonly:false ~log_size dest in *)
-    let old_index = Index.v ~fresh:false ~readonly:true ~log_size root in
+    Printf.eprintf "opening index\n%!";
+    let index = Index.v ~fresh:false ~readonly:true ~log_size root in
     let pack_file = Filename.concat root "store.pack" in
+    Printf.eprintf "opening pack\n%!";
     let pack =
       IO.v ~fresh:false ~readonly:true ~version:(Some Version.version) pack_file
     in
+    Printf.eprintf "opening dict\n%!";
     let dict = Dict.v ~fresh:false ~readonly:true root in
 
     let total = IO.offset pack in
@@ -340,6 +341,8 @@ end = struct
     in
     let _ = Pass0.run ~progress ~total pack in
     Utils.Progress.finalise bar;
+
+    ignore (dict, pack, index);
 
     IO.close pack;
     fun ppf -> Format.fprintf ppf "success!!"
