@@ -15,6 +15,12 @@ module type Args = sig
   module Commit : Pack_value.S with type hash = Hash.t
 end
 
+let mem_usage ppf =
+  Format.fprintf ppf "%.3fGB"
+    (Gc.((quick_stat ()).heap_words) * (Sys.word_size / 8)
+    |> float_of_int
+    |> ( *. ) 1e-9)
+
 module Make (Args : Args) : sig
   val run : Irmin.config -> Format.formatter -> unit
 end = struct
@@ -77,9 +83,9 @@ end = struct
     let hash v = Irmin.Type.(short_hash Int63.t |> unstage) v
   end)
 
-  (** Read pack file *)
+  (** Index pack file *)
   module Pass0 = struct
-    type entry = { length : length; kind : kind; bytes : string }
+    type entry = { len : length; kind : kind }
 
     type content = {
       per_offset : hash Offsetmap.t;
@@ -101,9 +107,9 @@ end = struct
         assert (off_after_kind = buffer_off + Hash.hash_size + 1);
         (* Get the length of the entire entry *)
         let len = decode_entry_length kind buffer buffer_off in
-        if buffer_off + len > String.length buffer then raise Not_enough_buffer;
-        let data = String.sub buffer buffer_off len in
-        (off, len, kind, key, data)
+        (* if buffer_off + len > String.length buffer then raise Not_enough_buffer; *)
+        (* let data = String.sub buffer buffer_off len in *)
+        (off, len, kind, key)
       with
       | Invalid_argument msg when msg = "index out of bounds" ->
           raise Not_enough_buffer
@@ -111,7 +117,7 @@ end = struct
           raise Not_enough_buffer
 
     let fold_entries ~total pack f acc0 =
-      let buffer = ref (Bytes.create 1024) in
+      let buffer = ref (Bytes.create (1024 * 1024)) in
       let refill_buffer ~from =
         let read = IO.read pack ~off:from !buffer in
         let filled = read = Bytes.length !buffer in
@@ -147,7 +153,7 @@ end = struct
               ~buffer_off
           with
           | entry ->
-              let _, entry_len, _, _, _ = entry in
+              let _, entry_len, _, _ = entry in
               let entry_lenL = Int63.of_int entry_len in
               aux ~buffer_off:(buffer_off + entry_len) (off ++ entry_lenL)
                 (f acc entry)
@@ -170,17 +176,16 @@ end = struct
     let run ~progress ~total pack =
       let per_hash = Hashtbl.create 10_000_000 in
       let acc0 = (0, Offsetmap.empty) in
-      let accumulate (idx, per_offset) (off, len, kind, key, data) =
+      let accumulate (idx, per_offset) (off, len, kind, key) =
         progress (Int63.of_int len);
         if idx mod 2_000_000 = 0 then
-          Fmt.epr "\n%#12dth at %#13Ld (%9.6f%%): '%a', %a, <%d bytes>\n%!" idx
-            (Int63.to_int64 off)
+          Fmt.epr
+            "\n%#12dth at %#13Ld (%9.6f%%): '%a', %a, <%d bytes> (%t RAM)\n%!"
+            idx (Int63.to_int64 off)
             (Int63.to_float off /. Int63.to_float total *. 100.)
-            Pack_value.Kind.pp kind pp_key key len;
+            Pack_value.Kind.pp kind pp_key key len mem_usage;
         let for_hash =
-          ( off,
-            { length = len; kind = Pack_value.Kind.to_magic kind; bytes = data }
-          )
+          (off, { len; kind = Pack_value.Kind.to_magic kind })
           ::
           (match Hashtbl.find_opt per_hash key with None -> [] | Some l -> l)
         in
@@ -194,16 +199,21 @@ end = struct
         | `Eof acc -> (acc, [])
         | `Leftovers (acc, err) -> (acc, [ err ])
       in
+      (* TODO: Are all hashes unique? *)
       { per_offset; per_hash; extra_errors }
   end
 
-  (** Rebuild values (and check their integrity) *)
+  (** Partially rebuild values *)
   module Pass1 = struct
     type value =
-      [ `Contents of Contents.t | `Node of Inode.Val.t | `Commit of Commit.t ]
+      [ `Blob of Contents.t
+      | `Node of Inode_internal.Raw.t * (hash * offset) list
+      | `Commit of Commit.t ]
+
+    (* type pred = [ `Hash of Hash.t | `Offset of offset ] *)
 
     type entry = {
-      length : length;
+      len : length;
       kind : kind;
       reconstruction : (string, value) result;
     }
@@ -213,20 +223,119 @@ end = struct
       per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
       extra_errors : string list;
     }
+
+    let fold_entries pack ~pack_size pass0 f acc =
+      let buffer = ref (Bytes.create (1024 * 1024)) in
+      let refill_buffer ~from =
+        let read = IO.read pack ~off:from !buffer in
+        let filled = read = Bytes.length !buffer in
+        let eof = Int63.equal pack_size (Int63.add from (Int63.of_int read)) in
+        assert (filled || eof);
+        if not filled then buffer := Bytes.sub !buffer 0 read
+      in
+      let expand_and_refill_buffer ~from length =
+        buffer := Bytes.create length;
+        refill_buffer ~from
+      in
+      let ensure_loaded buffer_off ~from ~len =
+        if Bytes.length !buffer < len then (
+          expand_and_refill_buffer ~from len;
+          0)
+        else if buffer_off + len > Bytes.length !buffer then (
+          refill_buffer ~from;
+          0)
+        else buffer_off
+      in
+      let aux off key (buffer_off, acc) =
+        let Pass0.{ len; kind } =
+          Hashtbl.find pass0.Pass0.per_hash key |> List.assoc off
+        in
+        let buffer_off = ensure_loaded buffer_off ~from:off ~len in
+        let acc = f acc key off len kind !buffer buffer_off in
+        (buffer_off + len, acc)
+      in
+      refill_buffer ~from:Int63.zero;
+      Offsetmap.fold aux pass0.Pass0.per_offset (0, acc)
+
+    let run ~progress pack ~pack_size dict pass0 =
+      let entry_count = Offsetmap.cardinal pass0.Pass0.per_offset in
+      let objects = Hashtbl.create entry_count in
+      let f idx key off len kind buffer buffer_off =
+        if idx mod 2_000_000 = 0 then
+          Fmt.epr
+            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            idx (Int63.to_int64 off)
+            (float_of_int idx /. float_of_int entry_count *. 100.)
+            kind pp_key key len mem_usage;
+        let reconstruct_commit () =
+          Commit.decode_bin
+            ~dict:(fun _ -> assert false)
+            ~hash:(fun _ -> assert false)
+            (Bytes.unsafe_to_string buffer)
+            buffer_off
+          |> snd
+        in
+        let reconstruct_contents () =
+          Contents.decode_bin
+            ~dict:(fun _ -> assert false)
+            ~hash:(fun _ -> assert false)
+            (Bytes.unsafe_to_string buffer)
+            buffer_off
+          |> snd
+        in
+        let reconstruct_node () =
+          let indirect_children = ref [] in
+          let hash_of_offset o =
+            match Offsetmap.find_opt o pass0.Pass0.per_offset with
+            | None ->
+                Fmt.failwith "Could not find child at offset %a"
+                  (Repr.pp Int63.t) o
+            | Some key ->
+                indirect_children := (key, o) :: !indirect_children;
+                key
+          in
+          let bin =
+            Inode_internal.Raw.decode_bin ~dict:(Dict.find dict)
+              ~hash:hash_of_offset
+              (Bytes.unsafe_to_string buffer)
+              buffer_off
+            |> snd
+          in
+          (bin, indirect_children)
+        in
+        let obj =
+          try
+            match kind with
+            | 'C' -> Ok (`Commit (reconstruct_commit ()))
+            | 'B' -> Ok (`Blob (reconstruct_contents ()))
+            | 'I' | 'N' -> Ok (`Node (reconstruct_node ()))
+            | _ -> assert false
+          with
+          | Assert_failure _ as e -> raise e
+          (* | e -> raise e *)
+          | e -> Error (Printexc.to_string e)
+        in
+        Hashtbl.add objects key obj;
+        progress Int63.one;
+        idx + 1
+      in
+
+      let acc = fold_entries pack ~pack_size pass0 f 0 in
+      acc
   end
 
-  (** Produce higher level insights *)
   module Pass2 = struct
-    type t
+    (* type t *)
     (* type reconstruction = {
      *   preds :
-     *     [ `Contents of offset * [ `Offset | `Hash ]
+     *     [ `Blob of offset * [ `Offset | `Hash ]
      *     | `Node of offset * [ `Offset | `Hash ]
      *     | `Commit of offset ]
      *     list;
      * } *)
     (* graph : Offsetgraph.t; *)
   end
+  (** Produce higher level insights *)
 
   (* let ingest_data_file ~progress ~total pack dict old_index () = *)
   (* let io_read_and_decode_hash ~off =
@@ -333,14 +442,27 @@ end = struct
     Printf.eprintf "opening dict\n%!";
     let dict = Dict.v ~fresh:false ~readonly:true root in
 
+    Printf.eprintf "Pass0 - go\n%!";
     let total = IO.offset pack in
     let bar, progress =
-      Utils.Progress.counter ~total ~sampling_interval:100
+      Utils.Progress.counter ~total ~sampling_interval:10_000
         ~message:"Brute force integrity check, pass0" ~pp_count:Utils.pp_bytes
         ()
     in
-    let _ = Pass0.run ~progress ~total pack in
+    let pass0 = Pass0.run ~progress ~total pack in
     Utils.Progress.finalise bar;
+    Printf.eprintf "Pass0 - done\n%!";
+
+    Printf.eprintf "Pass1 - go\n%!";
+    let bar, progress =
+      Utils.Progress.counter
+        ~total:(Offsetmap.cardinal pass0.Pass0.per_offset |> Int63.of_int)
+        ~sampling_interval:10_000 ~message:"Brute force integrity check, pass1"
+        ()
+    in
+    let _ = Pass1.run ~progress ~pack_size:total pack dict pass0 in
+    Utils.Progress.finalise bar;
+    Printf.eprintf "Pass1 - done\n%!";
 
     ignore (dict, pack, index);
 
