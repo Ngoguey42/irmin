@@ -1116,7 +1116,6 @@ struct
       apply t { f }
 
     let of_raw find' v =
-      (* Printf.eprintf "of_raw\n%!"; *)
       let rec find h =
         match find' h with None -> None | Some v -> Some (I.of_bin layout v)
       and layout = I.Partial find in

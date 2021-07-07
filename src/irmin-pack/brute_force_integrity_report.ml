@@ -324,10 +324,29 @@ end = struct
       }
   end
 
-  (** Produce higher level insights *)
+  (** Reconstruct inodes *)
   module Pass2 = struct
+    type value =
+      [ `Blob of Contents.t
+      | `Node of Inode.Val.t * (hash * offset) list
+      | `Commit of Commit_value.t ]
+
+    type entry = {
+      len : length;
+      kind : kind;
+      reconstruction :
+        [ `Error_p1 of string
+        | `Error_p2 of Inode_internal.Raw.t * string
+        | `Ok of value ];
+    }
+
+    type content = {
+      per_offset : hash Offsetmap.t;
+      per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
+      extra_errors : string list;
+    }
+
     (* type pred = [ `Hash of Hash.t | `Offset of offset ] *)
-    type t
 
     (* type reconstruction = {
      *   preds :
@@ -340,25 +359,76 @@ end = struct
     let run ~progress pass1 =
       let entry_count = Offsetmap.cardinal pass1.Pass1.per_offset in
       let obj_of_hash = Hashtbl.create entry_count in
+      let duplicate_hashes =
+        let tbl = Hashtbl.create 0 in
+        Hashtbl.iter
+          (fun key -> function
+            | [ _ ] -> ()
+            | [] -> assert false
+            | l -> Hashtbl.add tbl key (List.length l))
+          pass1.Pass1.per_hash;
+        tbl
+      in
+      Printf.eprintf "\n%d duplicate hashes\n%!"
+        (Hashtbl.length duplicate_hashes);
+
+      (* let reconstructed_inodes_cache = Hashtbl.create entry_count in *)
+      let get_raw_inode key =
+        match Hashtbl.find_opt pass1.Pass1.per_hash key with
+        | Some Pass1.[ (_, { reconstruction = `Ok (`Node (bin, _)); _ }) ] ->
+            Some bin
+        | _ ->
+            Fmt.failwith
+              "Abort inode reconstruction because SO MANY PROBLEMS POSSIBLE \
+               (%a)"
+              (Repr.pp Hash.t) key
+      in
+      let reconstruct_inode key bin =
+        let obj = Inode_internal.Val.of_raw get_raw_inode bin in
+        let key' = Inode_internal.Val.rehash obj in
+        if not (key_equal key key') then
+          Fmt.failwith
+            "Rehasing inode have a different hash. Expected %a, found %a" pp_key
+            key pp_key key' obj;
+        obj
+      in
+
       let aux off key idx =
         let Pass1.{ len; kind; reconstruction } =
           Hashtbl.find pass1.Pass1.per_hash key |> List.assoc off
         in
-        let _ =
-          match reconstruction with
-          | `Error_p1 _ -> []
-          | `Ok (`Blob _) -> []
-          | `Ok (`Commit obj) ->
-              `Node (Commit.node obj)
-              :: List.map (fun c -> `Commit c) (Commit.parents obj)
-          (* | Ok (`Node bin) -> *)
-        in
+        if idx mod 2_000_000 = 0 then
+          Fmt.epr
+            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            idx (Int63.to_int64 off)
+            (float_of_int idx /. float_of_int entry_count *. 100.)
+            kind pp_key key len mem_usage;
 
+        progress Int63.one;
+        let reconstruction =
+          match reconstruction with
+          | `Ok (`Node (bin, indirect_children)) -> (
+              try
+                let obj = reconstruct_inode key bin in
+                `Ok (`Node (obj, indirect_children))
+              with
+              | Assert_failure _ as e -> raise e
+              | e ->
+                  (* `Error_p2 (bin, Printexc.to_string e) *)
+                  raise e)
+          | (`Ok (`Blob _ | `Commit _) as v) | (`Error_p1 _ as v) -> v
+        in
         idx + 1
       in
 
       Offsetmap.fold aux pass1.Pass1.per_offset 0
   end
+  (* match reconstruction with
+   * | `Error_p1 _ -> []
+   * | `Ok (`Blob _) -> []
+   * | `Ok (`Commit obj) ->
+   *     `Node (Commit.node obj)
+   *     :: List.map (fun c -> `Commit c) (Commit.parents obj) *)
 
   let run config =
     if Conf.readonly config then raise S.RO_not_allowed;
