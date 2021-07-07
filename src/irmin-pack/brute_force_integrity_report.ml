@@ -424,6 +424,65 @@ end = struct
       }
   end
 
+  module Pass3 = struct
+    type value =
+      [ `Blob of Contents.t
+      | `Node of Inode.Val.t * (hash * offset) list
+      | `Commit of Commit_value.t ]
+
+    type entry = {
+      len : length;
+      kind : kind;
+      reconstruction :
+        [ `Error_p1 of string
+        | `Error_p2 of Inode_internal.Raw.t * string
+        | `Ok of value ];
+    }
+
+    type content = {
+      per_offset : hash Offsetmap.t;
+      per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
+      extra_errors : string list;
+      }
+
+    let run ~progress pass2 =
+      let entry_count = Offsetmap.cardinal pass2.Pass2.per_offset in
+      let g = Offsetgraph.create ~size:entry_count () in
+      let aux off key idx =
+        let Pass2.{ len; kind; reconstruction } =
+          Hashtbl.find pass2.Pass2.per_hash key |> List.assoc off
+        in
+        match reconstruction with
+        |
+        let reconstruction =
+          match reconstruction with
+          | `Ok (`Node (bin, indirect_children)) -> (
+              try
+                let obj = reconstruct_inode key bin in
+                `Ok (`Node (obj, indirect_children))
+              with
+              | Assert_failure _ as e -> raise e
+              | e ->
+                  (* `Error_p2 (bin, Printexc.to_string e) *)
+                  raise e)
+          | (`Ok (`Blob _ | `Commit _) as v) | (`Error_p1 _ as v) -> v
+        in
+
+        if idx mod 2_000_000 = 0 then
+          Fmt.epr
+            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            idx (Int63.to_int64 off)
+            (float_of_int idx /. float_of_int entry_count *. 100.)
+            kind pp_key key len mem_usage;
+        progress Int63.one;
+        idx + 1
+      in
+
+      let (_ : int) = Offsetmap.fold aux pass1.Pass1.per_offset 0 in
+      ()
+
+  end
+
   (* match reconstruction with
    * | `Error_p1 _ -> []
    * | `Ok (`Blob _) -> []
