@@ -244,7 +244,8 @@ struct
       module Inode_internal = X.Node.CA.Inter
       module Dict = Dict
       module Contents = X.Contents.Pack_value
-      module Commit = X.Commit.Pack_value
+      module Commit = X.Commit.Commit
+      module Commit_value = X.Commit.Pack_value
     end)
 
     let brute_force_integrity_report = Brute_force_integrity_report.run
