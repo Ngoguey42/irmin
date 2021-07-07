@@ -90,6 +90,13 @@ end = struct
     let hash v = Irmin.Type.(short_hash Int63.t |> unstage) v
   end)
 
+  module Hashgraph = Graph.Imperative.Digraph.Concrete (struct
+    type t = Hash.t * [ `Inner | `Outer ]
+    [@@deriving irmin ~compare ~equal ~short_hash]
+
+    let hash x = short_hash x
+  end)
+
   (** Index pack file *)
   module Pass0 = struct
     type entry = { len : length; kind : kind }
@@ -365,11 +372,26 @@ end = struct
               "Abort stable inode rehash because a children is a commit or a \
                blob (%a)"
               (Repr.pp Hash.t) key
-        | Some _ ->
-            Fmt.failwith
-              "Abort stable inode rehash because a children hash occurs \
-               multiple time (%a)"
-              (Repr.pp Hash.t) key
+        | Some l -> (
+            match
+              List.find_map
+                (function
+                  | _, Pass1.{ reconstruction = `Ok (`Node (bin, _)); _ } ->
+                      Some bin
+                  | _ -> None)
+                l
+            with
+            | Some bin -> Some bin (* /!\ Using the first occurence of hash *)
+            | None ->
+                Fmt.failwith
+                  "Abort stable inode rehash because a children hash occurs \
+                   multiple time and none are good inodes (%a)"
+                  (Repr.pp Hash.t) key)
+        (* | Some _ ->
+         *     Fmt.failwith
+         *       "Abort stable inode rehash because a children hash occurs \
+         *        multiple time (%a)"
+         *       (Repr.pp Hash.t) key *)
         | None ->
             Fmt.failwith
               "Abort stable inode rehash because a children hash is unknown \
@@ -425,47 +447,51 @@ end = struct
   end
 
   module Pass3 = struct
-    type value =
-      [ `Blob of Contents.t
-      | `Node of Inode.Val.t * (hash * offset) list
-      | `Commit of Commit_value.t ]
-
-    type entry = {
-      len : length;
-      kind : kind;
-      reconstruction :
-        [ `Error_p1 of string
-        | `Error_p2 of Inode_internal.Raw.t * string
-        | `Ok of value ];
-    }
-
-    type content = {
-      per_offset : hash Offsetmap.t;
-      per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
-      extra_errors : string list;
-      }
-
     let run ~progress pass2 =
       let entry_count = Offsetmap.cardinal pass2.Pass2.per_offset in
-      let g = Offsetgraph.create ~size:entry_count () in
+      let g = Hashgraph.create ~size:entry_count () in
+
+      (* let hash_has_multiple_occurences k =
+       *   let assoc = Hashtbl.find pass2.Pass2.per_hash k in
+       *   List.length assoc > 1
+       * in *)
       let aux off key idx =
-        let Pass2.{ len; kind; reconstruction } =
-          Hashtbl.find pass2.Pass2.per_hash key |> List.assoc off
-        in
-        match reconstruction with
-        |
-        let reconstruction =
-          match reconstruction with
-          | `Ok (`Node (bin, indirect_children)) -> (
-              try
-                let obj = reconstruct_inode key bin in
-                `Ok (`Node (obj, indirect_children))
-              with
-              | Assert_failure _ as e -> raise e
-              | e ->
-                  (* `Error_p2 (bin, Printexc.to_string e) *)
-                  raise e)
-          | (`Ok (`Blob _ | `Commit _) as v) | (`Error_p1 _ as v) -> v
+        let assoc = Hashtbl.find pass2.Pass2.per_hash key in
+        let multiple_hash_occurences = List.length assoc > 1 in
+        let Pass2.{ len; kind; reconstruction } = List.assoc off assoc in
+
+        let truc =
+          if multiple_hash_occurences then
+            `Error_p3
+              (Fmt.str
+                 "Could not link hash (%a) because it has several occurences."
+                 pp_key key)
+          else
+            let errors = ref [] in
+            let link_to_pred key' =
+              (* if hash_has_multiple_occurences key' then *)
+              (* errors := [ `Error ] :: !errors *)
+              (* else *)
+              if Hashtbl.mem pass2.Pass2.per_hash key' then
+                Hashgraph.add_edge g (key, `Inner) (key', `Outer)
+              else
+                let e = Fmt.str "Unknown children hash %a" pp_key key' in
+                errors := [ e ] :: !errors
+            in
+            Hashgraph.add_edge g (key, `Outer) (key, `Inner);
+            match reconstruction with
+            | (`Error_p1 _ | `Error_p2 _) as x -> x
+            | `Ok (`Blob _) as x -> x
+            | `Ok (`Commit c) as x ->
+                link_to_pred (Commit.node c);
+                List.iter link_to_pred (Commit.parents c);
+                x
+            | `Ok (`Node (n, _)) as x ->
+                List.iter
+                  (function
+                    | `Contents h | `Inode h | `Node h -> link_to_pred h)
+                  (Inode.Val.pred n);
+                x
         in
 
         if idx mod 2_000_000 = 0 then
@@ -478,17 +504,10 @@ end = struct
         idx + 1
       in
 
-      let (_ : int) = Offsetmap.fold aux pass1.Pass1.per_offset 0 in
+      let (_ : int) = Offsetmap.fold aux pass2.Pass2.per_offset 0 in
       ()
-
   end
 
-  (* match reconstruction with
-   * | `Error_p1 _ -> []
-   * | `Ok (`Blob _) -> []
-   * | `Ok (`Commit obj) ->
-   *     `Node (Commit.node obj)
-   *     :: List.map (fun c -> `Commit c) (Commit.parents obj) *)
   (* type pred = [ `Hash of Hash.t | `Offset of offset ] *)
 
   (* type reconstruction = {
@@ -559,9 +578,20 @@ end = struct
         ~sampling_interval:10_000 ~message:"Brute force integrity check, pass2"
         ()
     in
-    let _ = Pass2.run ~progress pass1 in
+    let pass2 = Pass2.run ~progress pass1 in
     Utils.Progress.finalise bar;
     Printf.eprintf "Pass2 - done\n%!";
+
+    Printf.eprintf "Pass3 - go\n%!";
+    let bar, progress =
+      Utils.Progress.counter
+        ~total:(Offsetmap.cardinal pass0.Pass0.per_offset |> Int63.of_int)
+        ~sampling_interval:10_000 ~message:"Brute force integrity check, pass3"
+        ()
+    in
+    let _ = Pass3.run ~progress pass2 in
+    Utils.Progress.finalise bar;
+    Printf.eprintf "Pass3 - done\n%!";
 
     ignore index;
     IO.close pack;
