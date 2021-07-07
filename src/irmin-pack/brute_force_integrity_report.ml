@@ -198,7 +198,6 @@ end = struct
         | `Eof acc -> (acc, [])
         | `Leftovers (acc, err) -> (acc, [ err ])
       in
-      (* TODO: Are all hashes unique? *)
       { per_offset; per_hash; extra_errors }
   end
 
@@ -324,21 +323,6 @@ end = struct
       }
   end
 
-  (* (\** Identify duplicate hashes *\)
-   * module Pass2 = struct
-   *   let run ~progress pass1 =
-   *     let tbl = Hashtbl.create 0 in
-   *     Hashtbl.iter
-   *       (fun key ->
-   *         progress Int63.one;
-   *         function
-   *         | [ _ ] -> ()
-   *         | [] -> assert false
-   *         | l -> Hashtbl.add tbl key (List.length l))
-   *       pass1.Pass1.per_hash;
-   *     tbl
-   * end *)
-
   (** Reconstruct inodes *)
   module Pass2 = struct
     type value =
@@ -361,16 +345,6 @@ end = struct
       extra_errors : string list;
     }
 
-    (* type pred = [ `Hash of Hash.t | `Offset of offset ] *)
-
-    (* type reconstruction = {
-     *   preds :
-     *     [ `Blob of offset * [ `Offset | `Hash ]
-     *     | `Node of offset * [ `Offset | `Hash ]
-     *     | `Commit of offset ]
-     *     list;
-     * } *)
-    (* graph : Offsetgraph.t; *)
     let run ~progress pass1 =
       let entry_count = Offsetmap.cardinal pass1.Pass1.per_offset in
       let obj_of_hash = Hashtbl.create entry_count in
@@ -449,21 +423,47 @@ end = struct
         extra_errors = pass1.Pass1.extra_errors;
       }
   end
+
   (* match reconstruction with
    * | `Error_p1 _ -> []
    * | `Ok (`Blob _) -> []
    * | `Ok (`Commit obj) ->
    *     `Node (Commit.node obj)
    *     :: List.map (fun c -> `Commit c) (Commit.parents obj) *)
+  (* type pred = [ `Hash of Hash.t | `Offset of offset ] *)
+
+  (* type reconstruction = {
+   *   preds :
+   *     [ `Blob of offset * [ `Offset | `Hash ]
+   *     | `Node of offset * [ `Offset | `Hash ]
+   *     | `Commit of offset ]
+   *     list;
+   * } *)
+  (* graph : Offsetgraph.t; *)
+
+  (* (\** Identify duplicate hashes *\)
+   * module Pass2 = struct
+   *   let run ~progress pass1 =
+   *     let tbl = Hashtbl.create 0 in
+   *     Hashtbl.iter
+   *       (fun key ->
+   *         progress Int63.one;
+   *         function
+   *         | [ _ ] -> ()
+   *         | [] -> assert false
+   *         | l -> Hashtbl.add tbl key (List.length l))
+   *       pass1.Pass1.per_hash;
+   *     tbl
+   * end *)
 
   let run config =
     if Conf.readonly config then raise S.RO_not_allowed;
     let run_duration = Mtime_clock.counter () in
     let root = Conf.root config in
     let log_size = Conf.index_log_size config in
+    let pack_file = Filename.concat root "store.pack" in
     Printf.eprintf "opening index\n%!";
     let index = Index.v ~fresh:false ~readonly:true ~log_size root in
-    let pack_file = Filename.concat root "store.pack" in
     Printf.eprintf "opening pack\n%!";
     let pack =
       IO.v ~fresh:false ~readonly:true ~version:(Some Version.version) pack_file
