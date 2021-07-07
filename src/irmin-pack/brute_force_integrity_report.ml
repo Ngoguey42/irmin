@@ -324,6 +324,21 @@ end = struct
       }
   end
 
+  (* (\** Identify duplicate hashes *\)
+   * module Pass2 = struct
+   *   let run ~progress pass1 =
+   *     let tbl = Hashtbl.create 0 in
+   *     Hashtbl.iter
+   *       (fun key ->
+   *         progress Int63.one;
+   *         function
+   *         | [ _ ] -> ()
+   *         | [] -> assert false
+   *         | l -> Hashtbl.add tbl key (List.length l))
+   *       pass1.Pass1.per_hash;
+   *     tbl
+   * end *)
+
   (** Reconstruct inodes *)
   module Pass2 = struct
     type value =
@@ -359,30 +374,35 @@ end = struct
     let run ~progress pass1 =
       let entry_count = Offsetmap.cardinal pass1.Pass1.per_offset in
       let obj_of_hash = Hashtbl.create entry_count in
-      let duplicate_hashes =
-        let tbl = Hashtbl.create 0 in
-        Hashtbl.iter
-          (fun key -> function
-            | [ _ ] -> ()
-            | [] -> assert false
-            | l -> Hashtbl.add tbl key (List.length l))
-          pass1.Pass1.per_hash;
-        tbl
-      in
-      Printf.eprintf "\n%d duplicate hashes\n%!"
-        (Hashtbl.length duplicate_hashes);
+      let per_hash = Hashtbl.create entry_count in
 
-      (* let reconstructed_inodes_cache = Hashtbl.create entry_count in *)
       let get_raw_inode key =
         match Hashtbl.find_opt pass1.Pass1.per_hash key with
         | Some Pass1.[ (_, { reconstruction = `Ok (`Node (bin, _)); _ }) ] ->
             Some bin
-        | _ ->
+        | Some Pass1.[ (_, { reconstruction = `Error_p1 _; _ }) ] ->
             Fmt.failwith
-              "Abort inode reconstruction because SO MANY PROBLEMS POSSIBLE \
+              "Abort stable inode rehash because a children failed at Pass1  \
+               (%a)"
+              (Repr.pp Hash.t) key
+        | Some Pass1.[ (_, { reconstruction = `Ok (`Commit _ | `Blob _); _ }) ]
+          ->
+            Fmt.failwith
+              "Abort stable inode rehash because a children is a commit or a \
+               blob (%a)"
+              (Repr.pp Hash.t) key
+        | Some _ ->
+            Fmt.failwith
+              "Abort stable inode rehash because a children hash occurs \
+               multiple time (%a)"
+              (Repr.pp Hash.t) key
+        | None ->
+            Fmt.failwith
+              "Abort stable inode rehash because a children hash is unknown \
                (%a)"
               (Repr.pp Hash.t) key
       in
+
       let reconstruct_inode key bin =
         let obj = Inode_internal.Val.of_raw get_raw_inode bin in
         let key' = Inode_internal.Val.rehash obj in
@@ -397,14 +417,6 @@ end = struct
         let Pass1.{ len; kind; reconstruction } =
           Hashtbl.find pass1.Pass1.per_hash key |> List.assoc off
         in
-        if idx mod 2_000_000 = 0 then
-          Fmt.epr
-            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
-            idx (Int63.to_int64 off)
-            (float_of_int idx /. float_of_int entry_count *. 100.)
-            kind pp_key key len mem_usage;
-
-        progress Int63.one;
         let reconstruction =
           match reconstruction with
           | `Ok (`Node (bin, indirect_children)) -> (
@@ -418,10 +430,24 @@ end = struct
                   raise e)
           | (`Ok (`Blob _ | `Commit _) as v) | (`Error_p1 _ as v) -> v
         in
+
+        if idx mod 2_000_000 = 0 then
+          Fmt.epr
+            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            idx (Int63.to_int64 off)
+            (float_of_int idx /. float_of_int entry_count *. 100.)
+            kind pp_key key len mem_usage;
+        add_to_assoc_at_key per_hash key off { len; kind; reconstruction };
+        progress Int63.one;
         idx + 1
       in
 
-      Offsetmap.fold aux pass1.Pass1.per_offset 0
+      let (_ : int) = Offsetmap.fold aux pass1.Pass1.per_offset 0 in
+      {
+        per_hash;
+        per_offset = pass1.Pass1.per_offset;
+        extra_errors = pass1.Pass1.extra_errors;
+      }
   end
   (* match reconstruction with
    * | `Error_p1 _ -> []
