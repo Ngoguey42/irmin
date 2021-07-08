@@ -890,7 +890,7 @@ end = struct
             l
 
     let pp_entry ppf (per_hash, idx, entry_count, off, byte_count, key, entry) =
-      Fmt.epr
+      Format.fprintf ppf
         "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%)\n\
          \'%c', %a, <%d bytes>\n\
          latest_commit_successor: %a\n\
