@@ -1,3 +1,5 @@
+(** This takes 200GB RAM and 90 (TODO) minutes for a 5GB pack file. *)
+
 open! Import
 module IO = IO.Unix
 
@@ -549,7 +551,9 @@ end = struct
                     (fun (k, o) ->
                       if o >= off then
                         let e =
-                          Fmt.str "Children %a with higher offset %a (+%a)"
+                          Fmt.str
+                            "Possesses a children %a with higher offset %a \
+                             (+%a)"
                             pp_key k (Repr.pp Int63.t) o (Repr.pp Int63.t)
                             Int63.(sub o off)
                         in
@@ -557,7 +561,11 @@ end = struct
                     indirect_children;
                   List.iter
                     (fun k ->
-                      let e = Fmt.str "Children by hash %a" pp_key k in
+                      let e =
+                        Fmt.str
+                          "Possesses a children by hash (direct children) %a"
+                          pp_key k
+                      in
                       warnings := e :: !warnings)
                     direct_children
                 in
@@ -586,6 +594,7 @@ end = struct
       }
   end
 
+  (** Find the commit connectivity *)
   module Pass4 = struct
     type value =
       [ `Blob of Contents.t | `Node of Inode.Val.t | `Commit of Commit_value.t ]
@@ -648,10 +657,278 @@ end = struct
       }
   end
 
-  let with_bar ~total ~phase f =
+  (** Correlate with Index file *)
+  module Pass5 = struct
+    type value =
+      [ `Blob of Contents.t | `Node of Inode.Val.t | `Commit of Commit_value.t ]
+    [@@deriving irmin]
+
+    type details =
+      [ `Error_p1 of string
+      | `Error_p2 of Inode_internal.Raw.t * string
+      | `Error_p3 of value * string
+      | `Ok of value ]
+    [@@deriving irmin]
+
+    type entry = {
+      len : length;
+      kind : kind;
+      details : details;
+      warnings : string list;
+      latest_commit_successor : hash option;
+      index_status : [ `Ok | `Missing | `Errors of string list ];
+    }
+
+    type t = {
+      entry_count : int;
+      byte_count : Int63.t;
+      per_offset : hash Offsetmap.t;
+      per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
+      extra_errors : string list;
+    }
+
+    let run ~progress byte_count pass4 index =
+      let entry_count = pass4.Pass4.entry_count in
+      let remaining_index_keys = Hashtbl.create entry_count in
+      let remaining_index_offs = Hashtbl.create entry_count in
+      let invalid_index_keys = Hashtbl.create 1000 in
+      let invalid_index_offs = Hashtbl.create 1000 in
+
+      (* Step 1 - Detect index entries not mapping well to pack *)
+      let aux key (off, len, kind) =
+        let kind = Pack_value.Kind.to_magic kind in
+        match Offsetmap.locate pass4.Pass4.per_offset off with
+        | (`Below _ | `Above _ | `Between _ | `Empty) as loc ->
+            let e =
+              Fmt.str
+                "The index entry hash=%a, off=%a, len=%d, kind=%c maps to the \
+                 pack file to %a"
+                pp_key key (Repr.pp Int63.t) off len kind
+                (Repr.pp (Offsetmap.location_t Hash.t))
+                loc
+            in
+            Hashtbl.add invalid_index_keys key e;
+            Hashtbl.add invalid_index_offs off e
+        | `Exact (_, key') ->
+            let Pass4.{ len = len'; kind = kind'; _ } =
+              Hashtbl.find pass4.Pass4.per_hash key |> List.assoc off
+            in
+            if not (key_equal key key' && len = len' && kind = kind') then (
+              let e =
+                Fmt.str
+                  "The index entry off=%a, hash=%a, len=%d, kind=%c maps to \
+                   the pack file to hash=%a, len=%d, kind=%c"
+                  (Repr.pp Int63.t) off pp_key key len kind pp_key key' len'
+                  kind'
+              in
+              Hashtbl.add invalid_index_keys key e;
+              Hashtbl.add invalid_index_keys key' e;
+              Hashtbl.add invalid_index_offs off e)
+            else (
+              Hashtbl.add remaining_index_offs off key;
+              Hashtbl.add remaining_index_keys key off)
+      in
+      Index.iter aux index;
+      progress Int63.one;
+      Printf.eprintf
+        "\n remaining_index_keys = %#d, invalid_index_keys = %#d\n%!"
+        (Hashtbl.length remaining_index_keys)
+        (Hashtbl.length invalid_index_keys);
+
+      (* Step 2 - Detect duplicate index entries *)
+      let aux key off =
+        let offs = Hashtbl.find_all remaining_index_keys key in
+        let keys = Hashtbl.find_all remaining_index_offs off in
+        match (keys, offs) with
+        | [ _ ], [ _ ] -> ()
+        | [], _ | _, [] -> assert false
+        | _, _ ->
+            let e =
+              Fmt.str
+                "Index's off=%a maps to key(s)=[%a]. Index's hash=%a maps to \
+                 off(s)=[%a]."
+                (Repr.pp Int63.t) off
+                Fmt.(list ~sep:semi pp_key)
+                keys pp_key key
+                Fmt.(list ~sep:semi (Repr.pp Int63.t))
+                offs
+            in
+            Hashtbl.add invalid_index_keys key e;
+            Hashtbl.add invalid_index_offs off e
+      in
+      Hashtbl.iter aux remaining_index_keys;
+      Hashtbl.to_seq_keys invalid_index_keys
+      |> Seq.iter (Hashtbl.remove remaining_index_keys);
+      Hashtbl.to_seq_keys invalid_index_offs
+      |> Seq.iter (Hashtbl.remove remaining_index_offs);
+      progress Int63.one;
+      Printf.eprintf
+        "\n remaining_index_keys = %#d, invalid_index_keys = %#d\n%!"
+        (Hashtbl.length remaining_index_keys)
+        (Hashtbl.length invalid_index_keys);
+
+      (* Step 3 - Detect entries that fail to be [find] *)
+      let aux key off =
+        match Index.find index key with
+        | None ->
+            let e =
+              Fmt.str "Index's find missed %a / %a" pp_key key (Repr.pp Int63.t)
+                off
+            in
+            Hashtbl.add invalid_index_keys key e;
+            Hashtbl.add invalid_index_offs off e
+        | Some (off', _, _) ->
+            if not (Int63.equal off off') then (
+              let e =
+                Fmt.str "Index's find gave %a for %a instead of %a "
+                  (Repr.pp Int63.t) off' pp_key key (Repr.pp Int63.t) off
+              in
+              Hashtbl.add invalid_index_keys key e;
+              Hashtbl.add invalid_index_offs off e)
+      in
+      Hashtbl.iter aux remaining_index_keys;
+      Hashtbl.to_seq_keys invalid_index_keys
+      |> Seq.iter (Hashtbl.remove remaining_index_keys);
+      Hashtbl.to_seq_keys invalid_index_offs
+      |> Seq.iter (Hashtbl.remove remaining_index_offs);
+      progress Int63.one;
+      Printf.eprintf
+        "\n remaining_index_keys = %#d, invalid_index_keys = %#d\n%!"
+        (Hashtbl.length remaining_index_keys)
+        (Hashtbl.length invalid_index_keys);
+
+      (* Step 4 - Attach the Index errors to their pack entry *)
+      let per_hash = Hashtbl.create entry_count in
+      let aux off key idx =
+        let Pass4.{ len; kind; details; warnings; latest_commit_successor } =
+          Hashtbl.find pass4.Pass4.per_hash key |> List.assoc off
+        in
+        let index_errors =
+          Hashtbl.find_all invalid_index_keys key
+          @ Hashtbl.find_all invalid_index_offs off
+          |> List.sort_uniq Stdlib.compare
+        in
+        let index_status =
+          match index_errors with
+          | [] -> if Hashtbl.mem remaining_index_keys key then `Ok else `Missing
+          | l -> `Errors l
+        in
+        add_to_assoc_at_key per_hash key off
+          {
+            len;
+            kind;
+            details;
+            warnings;
+            latest_commit_successor;
+            index_status;
+          };
+        idx + 1
+      in
+      let (_ : int) = Offsetmap.fold aux pass4.Pass4.per_offset 0 in
+      progress Int63.one;
+
+      (* Step 5 - Remember the orphan index errors *)
+      let rec remove_loop table k =
+        let len = Hashtbl.length table in
+        Hashtbl.remove table k;
+        let len' = Hashtbl.length table in
+        if len <> len' then remove_loop table k
+      in
+      Offsetmap.iter
+        (fun off key ->
+          remove_loop invalid_index_keys key;
+          remove_loop invalid_index_offs off)
+        pass4.Pass4.per_offset;
+      let new_extra_errors =
+        (Hashtbl.to_seq_values invalid_index_keys |> List.of_seq)
+        @ (Hashtbl.to_seq_values invalid_index_offs |> List.of_seq)
+        |> List.sort_uniq Stdlib.compare
+      in
+      Printf.eprintf
+        "\n remaining_index_keys = %#d, invalid_index_keys = %#d\n%!"
+        (Hashtbl.length remaining_index_keys)
+        (Hashtbl.length invalid_index_keys);
+      progress Int63.one;
+
+      {
+        byte_count;
+        entry_count = pass4.Pass4.entry_count;
+        per_hash;
+        per_offset = pass4.Pass4.per_offset;
+        extra_errors = pass4.Pass4.extra_errors @ new_extra_errors;
+      }
+
+    let is_entry_errorless = function
+      | {
+          details = `Ok _;
+          warnings = [];
+          latest_commit_successor = Some _;
+          index_status = `Ok;
+          _;
+        } ->
+          true
+      | _ -> false
+
+    let pp_latest_commit_successor ppf (per_hash, x) =
+      match x with
+      | None -> Format.fprintf ppf "orphan from any commit"
+      | Some key -> (
+          match Hashtbl.find per_hash key with
+          | (_, entry) :: _ -> (
+              match entry.details with
+              | `Error_p3 (`Commit v, _) | `Ok (`Commit v) ->
+                  (Repr.pp Commit_value.t) ppf v
+              | _ -> Format.fprintf ppf "<could not retrive commit details>")
+          | _ -> Format.fprintf ppf "<could not retrive commit details>")
+
+    let pp_index_status ppf = function
+      | `Ok -> Format.fprintf ppf "Ok"
+      | `Missing -> Format.fprintf ppf "No trace of this hash/offset"
+      | `Errors l ->
+          Format.fprintf ppf "errors: - %a"
+            Fmt.(list ~sep:(any "\n          - ") string)
+            l
+
+    let pp_entry ppf (per_hash, idx, entry_count, off, byte_count, key, entry) =
+      Fmt.epr
+        "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%)\n\
+         \'%c', %a, <%d bytes>\n\
+         latest_commit_successor: %a\n\
+         details: %a\n\
+         warnings: - %a\n\
+         index status:%a" idx entry_count (Int63.to_int64 off)
+        (Int63.to_int64 byte_count)
+        (Int63.to_float off /. Int63.to_float byte_count *. 100.)
+        entry.kind pp_key key entry.len pp_latest_commit_successor
+        (per_hash, entry.latest_commit_successor)
+        (Repr.pp details_t) entry.details
+        Fmt.(list ~sep:(any "\n          - ") string)
+        entry.warnings pp_index_status entry.index_status
+
+    let spacer =
+      "****************************************************************************************************"
+
+    let pp ppf
+        { per_offset; per_hash; entry_count; byte_count; extra_errors; _ } =
+      let idx = ref 0 in
+      Offsetmap.iter
+        (fun off key ->
+          let entry = Hashtbl.find per_hash key |> List.assoc off in
+          if not @@ is_entry_errorless entry then
+            Format.fprintf ppf "%s\n%a\n%s\n\n%!" spacer pp_entry
+              (per_hash, !idx, entry_count, off, byte_count, key, entry)
+              spacer;
+          incr idx)
+        per_offset;
+      List.iter
+        (fun err -> Format.fprintf ppf "extra error: %s\n" err)
+        extra_errors
+  end
+
+  let with_bar ?(sampling_interval = 10_000) ~total ~phase f =
     let message = Printf.sprintf "Brute force integrity check, pass%d" phase in
     let bar, progress =
-      Utils.Progress.counter ~total ~sampling_interval:10_000 ~message ()
+      Utils.Progress.counter ~total ~sampling_interval ~message ()
     in
     let res = f ~progress in
     Utils.Progress.finalise bar;
@@ -725,9 +1002,21 @@ end = struct
       pass4
     in
 
-    let _ = pass4 () in
+    let pass5 () =
+      let pass4 = pass4 () in
+      (* Gc.full_major (); *)
+      Printf.eprintf "Pass5 - go\n%!";
+      let pass5 =
+        with_bar ~phase:5 ~total:(Int63.of_int 5)
+          (Pass5.run byte_count pass4 index)
+          ~sampling_interval:1
+      in
+      Printf.eprintf "Pass5 - done\n%!";
+      pass5
+    in
 
+    let pass5 = pass5 () in
     ignore index;
     IO.close pack;
-    fun ppf -> Format.fprintf ppf "success!!"
+    fun ppf -> Format.fprintf ppf "%a\n%!" Pass5.pp pass5
 end
