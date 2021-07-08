@@ -374,7 +374,7 @@ end = struct
 
     let run ~progress pass1 =
       let entry_count = Offsetmap.cardinal pass1.Pass1.per_offset in
-      let obj_of_hash = Hashtbl.create entry_count in
+      (* let obj_of_hash = Hashtbl.create entry_count in *)
       let per_hash = Hashtbl.create entry_count in
 
       let get_raw_inode key =
@@ -936,7 +936,7 @@ end = struct
 
   let run config =
     if Conf.readonly config then raise S.RO_not_allowed;
-    let run_duration = Mtime_clock.counter () in
+    (* let run_duration = Mtime_clock.counter () in *)
     let root = Conf.root config in
     let log_size = Conf.index_log_size config in
     let pack_file = Filename.concat root "store.pack" in
