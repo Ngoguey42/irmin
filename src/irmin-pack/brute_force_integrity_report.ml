@@ -82,7 +82,12 @@ end = struct
       | None, None -> `Empty
   end
 
-  module Datemap = Stdlib.Map.Make (Int64)
+  module Datemap = struct
+    include Stdlib.Map.Make (Int64)
+
+    (** Available from ocaml 4.12. *)
+    let to_rev_seq map = to_seq map |> List.of_seq |> List.rev |> List.to_seq
+  end
 
   let _ = ignore (Offsetmap.locate, Index.value_t, key_equal)
 
@@ -95,8 +100,7 @@ end = struct
   end)
 
   module Hashgraph = Graph.Imperative.Digraph.Concrete (struct
-    type t = Hash.t * [ `Inner | `Outer ]
-    [@@deriving irmin ~compare ~equal ~short_hash]
+    type t = Hash.t [@@deriving irmin ~compare ~equal ~short_hash]
 
     let hash x = short_hash x
   end)
@@ -131,19 +135,20 @@ end = struct
       | Invalid_argument msg when msg = "String.blit / Bytes.blit_string" ->
           raise Not_enough_buffer
 
-    let fold_entries ~total pack f acc0 =
+    let fold_entries ~byte_count pack f acc0 =
       let buffer = ref (Bytes.create (1024 * 1024)) in
       let refill_buffer ~from =
         let read = IO.read pack ~off:from !buffer in
         let filled = read = Bytes.length !buffer in
-        let eof = Int63.equal total (Int63.add from (Int63.of_int read)) in
+        let eof = Int63.equal byte_count (Int63.add from (Int63.of_int read)) in
         if (not filled) && not eof then
           `Error
             (Fmt.str
-               "When refilling from offset %#Ld (total %#Ld), read %#d but \
-                expected %#d"
-               (Int63.to_int64 from) (Int63.to_int64 total) read
-               (Bytes.length !buffer))
+               "When refilling from offset %#Ld (byte_count %#Ld), read %#d \
+                but expected %#d"
+               (Int63.to_int64 from)
+               (Int63.to_int64 byte_count)
+               read (Bytes.length !buffer))
         else `Ok
       in
       let expand_and_refill_buffer ~from =
@@ -159,8 +164,8 @@ end = struct
           refill_buffer ~from)
       in
       let rec aux ~buffer_off off acc =
-        assert (off <= total);
-        if off = total then `Eof acc
+        assert (off <= byte_count);
+        if off = byte_count then `Eof acc
         else
           match
             decode_entry_exn ~off
@@ -188,7 +193,7 @@ end = struct
       refill_buffer ~from:Int63.zero |> ignore;
       aux ~buffer_off:0 Int63.zero acc0
 
-    let run ~progress ~total pack =
+    let run ~progress ~byte_count pack =
       let per_hash = Hashtbl.create 10_000_000 in
       let acc0 = (0, Offsetmap.empty) in
       let accumulate (idx, per_offset) (off, len, kind, key) =
@@ -197,14 +202,14 @@ end = struct
           Fmt.epr
             "\n%#12dth at %#13Ld (%9.6f%%): '%a', %a, <%d bytes> (%t RAM)\n%!"
             idx (Int63.to_int64 off)
-            (Int63.to_float off /. Int63.to_float total *. 100.)
+            (Int63.to_float off /. Int63.to_float byte_count *. 100.)
             Pack_value.Kind.pp kind pp_key key len mem_usage;
         add_to_assoc_at_key per_hash key off
           { len; kind = Pack_value.Kind.to_magic kind };
         let per_offset = Offsetmap.add off key per_offset in
         (idx + 1, per_offset)
       in
-      let res = fold_entries ~total pack accumulate acc0 in
+      let res = fold_entries ~byte_count pack accumulate acc0 in
       let (_, per_offset), extra_errors =
         match res with
         | `Eof acc -> (acc, [])
@@ -238,12 +243,12 @@ end = struct
       extra_errors : string list;
     }
 
-    let fold_entries pack ~pack_size pass0 f acc =
+    let fold_entries pack ~byte_count pass0 f acc =
       let buffer = ref (Bytes.create (1024 * 1024)) in
       let refill_buffer ~from =
         let read = IO.read pack ~off:from !buffer in
         let filled = read = Bytes.length !buffer in
-        let eof = Int63.equal pack_size (Int63.add from (Int63.of_int read)) in
+        let eof = Int63.equal byte_count (Int63.add from (Int63.of_int read)) in
         assert (filled || eof);
         if not filled then buffer := Bytes.sub !buffer 0 read
       in
@@ -271,7 +276,7 @@ end = struct
       refill_buffer ~from:Int63.zero;
       Offsetmap.fold aux pass0.Pass0.per_offset (0, acc) |> snd
 
-    let run ~progress pack ~pack_size dict pass0 =
+    let run ~progress pack ~byte_count dict pass0 =
       let entry_count = Offsetmap.cardinal pass0.Pass0.per_offset in
       let per_hash = Hashtbl.create entry_count in
       let f idx key off len kind buffer buffer_off =
@@ -333,7 +338,7 @@ end = struct
         idx + 1
       in
 
-      let (_ : int) = fold_entries pack ~pack_size pass0 f 0 in
+      let (_ : int) = fold_entries pack ~byte_count pass0 f 0 in
       {
         entry_count = pass0.Pass0.entry_count;
         per_hash;
@@ -452,7 +457,7 @@ end = struct
       }
   end
 
-  (** Build a graph of all this.
+  (** Build a graph and prepare for traversal.
 
       Commits are not linked together. *)
   module Pass3 = struct
@@ -467,17 +472,20 @@ end = struct
         | `Error_p2 of Inode_internal.Raw.t * string
         | `Error_p3 of value * string
         | `Ok of value ];
+      warnings : string list;
     }
 
     type t = {
       entry_count : int;
       graph : Hashgraph.t;
       commits_per_date : Hash.t Datemap.t;
+      per_offset : hash Offsetmap.t;
       per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
+      extra_errors : string list;
     }
 
     let run ~progress pass2 =
-      let entry_count = Offsetmap.cardinal pass2.Pass2.per_offset in
+      let entry_count = pass2.Pass2.entry_count in
       let graph = Hashgraph.create ~size:entry_count () in
       let commits_per_date = ref Datemap.empty in
       let per_hash = Hashtbl.create entry_count in
@@ -492,76 +500,75 @@ end = struct
             (float_of_int idx /. float_of_int entry_count *. 100.)
             kind pp_key key len mem_usage;
 
-        let details =
+        let details, warnings =
           match details with
-          | (`Error_p1 _ | `Error_p2 _) as x -> x
-          | `Ok obj -> (
+          | (`Error_p1 _ | `Error_p2 _) as x -> (x, [])
+          | `Ok obj ->
               let obj_out =
                 match obj with
                 | (`Commit _ | `Blob _) as x -> x
                 | `Node (x, _) -> `Node x
               in
-              let error_p3 e = `Error_p3 (obj_out, e) in
               if multiple_hash_occurences then
-                Fmt.str
-                  "Could not link hash (%a) because it has several occurences"
-                  pp_key key
-                |> error_p3
-              else
-                let errors = ref [] in
-                let ok_or_errors () =
-                  match !errors with
-                  | [] -> `Ok obj_out
-                  | l -> String.concat "\n" l |> error_p3
+                let e =
+                  Fmt.str
+                    "Could not link hash (%a) because it has several occurences"
+                    pp_key key
                 in
+                (`Error_p3 (obj_out, e), [])
+              else
+                let warnings = ref [] in
                 let link_to_pred key' =
                   if Hashtbl.mem pass2.Pass2.per_hash key' then
-                    Hashgraph.add_edge graph (key, `Inner) (key', `Outer)
+                    Hashgraph.add_edge graph key key'
                   else
                     let e = Fmt.str "Unknown children hash %a" pp_key key' in
-                    errors := e :: !errors
+                    warnings := e :: !warnings
                 in
 
-                match obj with
-                | `Blob _ as x ->
-                    Hashgraph.add_edge graph (key, `Outer) (key, `Inner);
-                    ok_or_errors ()
-                | `Commit c as x ->
-                    link_to_pred (Commit.node c);
-                    let date = Commit.info c |> Info.date in
-                    commits_per_date := Datemap.add date key !commits_per_date;
-                    ok_or_errors ()
-                | `Node (n, indirect_children) as x ->
-                    Hashgraph.add_edge graph (key, `Outer) (key, `Inner);
-                    let children =
-                      Inode.Val.pred n
-                      |> List.map (function
-                             | `Contents h | `Inode h | `Node h -> h)
-                    in
-                    List.iter link_to_pred children;
-                    let direct_children =
-                      List.filter
-                        (fun k -> not (List.mem_assoc k indirect_children))
-                        children
-                    in
-                    List.iter
-                      (fun (k, o) ->
-                        if o >= off then
-                          let e =
-                            Fmt.str "Children %a with higher offset %a (+%a)"
-                              pp_key k (Repr.pp Int63.t) o (Repr.pp Int63.t)
-                              Int63.(sub o off)
-                          in
-                          errors := e :: !errors)
-                      indirect_children;
-                    List.iter
-                      (fun k ->
-                        let e = Fmt.str "Children by hash %a" pp_key k in
-                        errors := e :: !errors)
-                      direct_children;
-                    ok_or_errors ())
+                let deal_with_blob () = Hashgraph.add_vertex graph key in
+                let deal_with_commit c =
+                  Hashgraph.add_vertex graph key;
+                  link_to_pred (Commit.node c);
+                  let date = Commit.info c |> Info.date in
+                  commits_per_date := Datemap.add date key !commits_per_date
+                in
+                let deal_with_node (n, indirect_children) =
+                  Hashgraph.add_vertex graph key;
+                  let children =
+                    Inode.Val.pred n
+                    |> List.map (function `Contents h | `Inode h | `Node h -> h)
+                  in
+                  List.iter link_to_pred children;
+                  let direct_children =
+                    List.filter
+                      (fun k -> not (List.mem_assoc k indirect_children))
+                      children
+                  in
+                  List.iter
+                    (fun (k, o) ->
+                      if o >= off then
+                        let e =
+                          Fmt.str "Children %a with higher offset %a (+%a)"
+                            pp_key k (Repr.pp Int63.t) o (Repr.pp Int63.t)
+                            Int63.(sub o off)
+                        in
+                        warnings := e :: !warnings)
+                    indirect_children;
+                  List.iter
+                    (fun k ->
+                      let e = Fmt.str "Children by hash %a" pp_key k in
+                      warnings := e :: !warnings)
+                    direct_children
+                in
+                (match obj with
+                | `Blob _ -> deal_with_blob ()
+                | `Commit c -> deal_with_commit c
+                | `Node x -> deal_with_node x);
+
+                (`Ok obj_out, !warnings)
         in
-        add_to_assoc_at_key per_hash key off { len; kind; details };
+        add_to_assoc_at_key per_hash key off { len; kind; details; warnings };
 
         progress Int63.one;
         idx + 1
@@ -574,8 +581,81 @@ end = struct
         graph;
         commits_per_date;
         per_hash;
+        per_offset = pass2.Pass2.per_offset;
+        extra_errors = pass2.Pass2.extra_errors;
       }
   end
+
+  module Pass4 = struct
+    type value =
+      [ `Blob of Contents.t | `Node of Inode.Val.t | `Commit of Commit_value.t ]
+
+    type entry = {
+      len : length;
+      kind : kind;
+      details :
+        [ `Error_p1 of string
+        | `Error_p2 of Inode_internal.Raw.t * string
+        | `Error_p3 of value * string
+        | `Ok of value ];
+      warnings : string list;
+      latest_commit_successor : hash option;
+    }
+
+    type t = {
+      entry_count : int;
+      per_offset : hash Offsetmap.t;
+      per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
+      extra_errors : string list;
+    }
+
+    let run ~progress pass3 =
+      let entry_count = pass3.Pass3.entry_count in
+      let graph = pass3.Pass3.graph in
+
+      let newest_commit_per_hash = Hashtbl.create entry_count in
+      let rec visit ~commit_hash hash =
+        if not @@ Hashtbl.mem newest_commit_per_hash hash then (
+          Hashtbl.add newest_commit_per_hash hash commit_hash;
+          if Hashtbl.length newest_commit_per_hash mod 2 = 0 then
+            progress Int63.one;
+          Hashgraph.iter_succ (visit ~commit_hash) graph hash)
+      in
+      let visit_commit (_date, hash) = visit ~commit_hash:hash hash in
+      Datemap.to_rev_seq pass3.Pass3.commits_per_date |> Seq.iter visit_commit;
+
+      (* The [newest_commit_per_hash] table now contains all the hashes of all
+         the objects reachable from a commit. The missing ones are orphan. *)
+      let per_hash = Hashtbl.create entry_count in
+      let aux off key idx =
+        let Pass3.{ len; kind; details; warnings } =
+          Hashtbl.find pass3.Pass3.per_hash key |> List.assoc off
+        in
+        let latest_commit_successor =
+          Hashtbl.find_opt newest_commit_per_hash key
+        in
+        add_to_assoc_at_key per_hash key off
+          { len; kind; details; warnings; latest_commit_successor };
+        if idx mod 2 = 0 then progress Int63.one;
+        idx + 1
+      in
+      let (_ : int) = Offsetmap.fold aux pass3.Pass3.per_offset 0 in
+      {
+        entry_count = pass3.Pass3.entry_count;
+        per_hash;
+        per_offset = pass3.Pass3.per_offset;
+        extra_errors = pass3.Pass3.extra_errors;
+      }
+  end
+
+  let with_bar ~total ~phase f =
+    let message = Printf.sprintf "Brute force integrity check, pass%d" phase in
+    let bar, progress =
+      Utils.Progress.counter ~total ~sampling_interval:10_000 ~message ()
+    in
+    let res = f ~progress in
+    Utils.Progress.finalise bar;
+    res
 
   let run config =
     if Conf.readonly config then raise S.RO_not_allowed;
@@ -595,63 +675,57 @@ end = struct
 
     let pass0 () =
       Printf.eprintf "Pass0 - go\n%!";
-      let bar, progress =
-        Utils.Progress.counter ~total:byte_count ~sampling_interval:10_000
-          ~message:"Brute force integrity check, pass0" ~pp_count:Utils.pp_bytes
-          ()
+      let pass0 =
+        with_bar ~phase:0 ~total:byte_count (Pass0.run ~byte_count pack)
       in
-      let pass0 = Pass0.run ~progress ~total:byte_count pack in
-      Utils.Progress.finalise bar;
       Printf.eprintf "Pass0 - done\n%!";
       pass0
     in
 
     let pass1 () =
       let pass0 = pass0 () in
-      Gc.compact ();
+      (* Gc.full_major (); *)
       let entry_count = Int63.of_int pass0.Pass0.entry_count in
       Printf.eprintf "Pass1 - go\n%!";
-      let bar, progress =
-        Utils.Progress.counter ~total:entry_count ~sampling_interval:10_000
-          ~message:"Brute force integrity check, pass1" ()
+      let pass1 =
+        with_bar ~phase:1 ~total:entry_count
+          (Pass1.run ~byte_count pack dict pass0)
       in
-      let pass1 = Pass1.run ~progress ~pack_size:byte_count pack dict pass0 in
-      Utils.Progress.finalise bar;
       Printf.eprintf "Pass1 - done\n%!";
       pass1
     in
 
     let pass2 () =
       let pass1 = pass1 () in
-      Gc.compact ();
+      (* Gc.full_major (); *)
       let entry_count = Int63.of_int pass1.Pass1.entry_count in
       Printf.eprintf "Pass2 - go\n%!";
-      let bar, progress =
-        Utils.Progress.counter ~total:entry_count ~sampling_interval:10_000
-          ~message:"Brute force integrity check, pass2" ()
-      in
-      let pass2 = Pass2.run ~progress pass1 in
-      Utils.Progress.finalise bar;
+      let pass2 = with_bar ~phase:2 ~total:entry_count (Pass2.run pass1) in
       Printf.eprintf "Pass2 - done\n%!";
       pass2
     in
 
     let pass3 () =
       let pass2 = pass2 () in
-      Gc.compact ();
+      (* Gc.full_major (); *)
       Printf.eprintf "Pass3 - go\n%!";
       let entry_count = Int63.of_int pass2.Pass2.entry_count in
-      let bar, progress =
-        Utils.Progress.counter ~total:entry_count ~sampling_interval:10_000
-          ~message:"Brute force integrity check, pass3" ()
-      in
-      let pass3 = Pass3.run ~progress pass2 in
-      Utils.Progress.finalise bar;
+      let pass3 = with_bar ~phase:3 ~total:entry_count (Pass3.run pass2) in
       Printf.eprintf "Pass3 - done\n%!";
       pass3
     in
 
-    let _ = pass3 () in
+    let pass4 () =
+      let pass3 = pass3 () in
+      (* Gc.full_major (); *)
+      Printf.eprintf "Pass4 - go\n%!";
+      let entry_count = Int63.of_int pass3.Pass3.entry_count in
+      let pass4 = with_bar ~phase:4 ~total:entry_count (Pass4.run pass3) in
+      Printf.eprintf "Pass4 - done\n%!";
+      pass4
+    in
+
+    let _ = pass4 () in
 
     ignore index;
     IO.close pack;
