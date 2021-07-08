@@ -16,6 +16,8 @@ module type Args = sig
 
   module Commit :
     Irmin.Commit.S with type hash = Hash.t with type t = Commit_value.t
+
+  module Info : Irmin.Info.S with type t = Commit.Info.t
 end
 
 let mem_usage ppf =
@@ -80,6 +82,8 @@ end = struct
       | None, None -> `Empty
   end
 
+  module Datemap = Stdlib.Map.Make (Int64)
+
   let _ = ignore (Offsetmap.locate, Index.value_t, key_equal)
 
   module Offsetgraph = Graph.Imperative.Digraph.Concrete (struct
@@ -102,6 +106,7 @@ end = struct
     type entry = { len : length; kind : kind }
 
     type content = {
+      entry_count : int;
       per_offset : hash Offsetmap.t;
       per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
       extra_errors : string list;
@@ -205,7 +210,12 @@ end = struct
         | `Eof acc -> (acc, [])
         | `Leftovers (acc, err) -> (acc, [ err ])
       in
-      { per_offset; per_hash; extra_errors }
+      {
+        per_offset;
+        per_hash;
+        extra_errors;
+        entry_count = Offsetmap.cardinal per_offset;
+      }
   end
 
   (** Partially rebuild values *)
@@ -218,10 +228,11 @@ end = struct
     type entry = {
       len : length;
       kind : kind;
-      reconstruction : [ `Error_p1 of string | `Ok of value ];
+      details : [ `Error_p1 of string | `Ok of value ];
     }
 
     type content = {
+      entry_count : int;
       per_offset : hash Offsetmap.t;
       per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
       extra_errors : string list;
@@ -306,7 +317,7 @@ end = struct
           in
           (bin, !indirect_children)
         in
-        let reconstruction =
+        let details =
           try
             match kind with
             | 'C' -> `Ok (`Commit (reconstruct_commit ()))
@@ -317,13 +328,14 @@ end = struct
           | Assert_failure _ as e -> raise e
           | e -> `Error_p1 (Printexc.to_string e)
         in
-        add_to_assoc_at_key per_hash key off { len; kind; reconstruction };
+        add_to_assoc_at_key per_hash key off { len; kind; details };
         progress Int63.one;
         idx + 1
       in
 
       let (_ : int) = fold_entries pack ~pack_size pass0 f 0 in
       {
+        entry_count = pass0.Pass0.entry_count;
         per_hash;
         per_offset = pass0.Pass0.per_offset;
         extra_errors = pass0.Pass0.extra_errors;
@@ -340,13 +352,14 @@ end = struct
     type entry = {
       len : length;
       kind : kind;
-      reconstruction :
+      details :
         [ `Error_p1 of string
         | `Error_p2 of Inode_internal.Raw.t * string
         | `Ok of value ];
     }
 
     type content = {
+      entry_count : int;
       per_offset : hash Offsetmap.t;
       per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
       extra_errors : string list;
@@ -359,15 +372,13 @@ end = struct
 
       let get_raw_inode key =
         match Hashtbl.find_opt pass1.Pass1.per_hash key with
-        | Some Pass1.[ (_, { reconstruction = `Ok (`Node (bin, _)); _ }) ] ->
-            Some bin
-        | Some Pass1.[ (_, { reconstruction = `Error_p1 _; _ }) ] ->
+        | Some Pass1.[ (_, { details = `Ok (`Node (bin, _)); _ }) ] -> Some bin
+        | Some Pass1.[ (_, { details = `Error_p1 _; _ }) ] ->
             Fmt.failwith
               "Abort stable inode rehash because a children failed at Pass1  \
                (%a)"
               (Repr.pp Hash.t) key
-        | Some Pass1.[ (_, { reconstruction = `Ok (`Commit _ | `Blob _); _ }) ]
-          ->
+        | Some Pass1.[ (_, { details = `Ok (`Commit _ | `Blob _); _ }) ] ->
             Fmt.failwith
               "Abort stable inode rehash because a children is a commit or a \
                blob (%a)"
@@ -376,8 +387,7 @@ end = struct
             match
               List.find_map
                 (function
-                  | _, Pass1.{ reconstruction = `Ok (`Node (bin, _)); _ } ->
-                      Some bin
+                  | _, Pass1.{ details = `Ok (`Node (bin, _)); _ } -> Some bin
                   | _ -> None)
                 l
             with
@@ -387,11 +397,6 @@ end = struct
                   "Abort stable inode rehash because a children hash occurs \
                    multiple time and none are good inodes (%a)"
                   (Repr.pp Hash.t) key)
-        (* | Some _ ->
-         *     Fmt.failwith
-         *       "Abort stable inode rehash because a children hash occurs \
-         *        multiple time (%a)"
-         *       (Repr.pp Hash.t) key *)
         | None ->
             Fmt.failwith
               "Abort stable inode rehash because a children hash is unknown \
@@ -410,11 +415,17 @@ end = struct
       in
 
       let aux off key idx =
-        let Pass1.{ len; kind; reconstruction } =
+        let Pass1.{ len; kind; details } =
           Hashtbl.find pass1.Pass1.per_hash key |> List.assoc off
         in
-        let reconstruction =
-          match reconstruction with
+        if idx mod 2_000_000 = 0 then
+          Fmt.epr
+            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            idx (Int63.to_int64 off)
+            (float_of_int idx /. float_of_int entry_count *. 100.)
+            kind pp_key key len mem_usage;
+        let details =
+          match details with
           | `Ok (`Node (bin, indirect_children)) -> (
               try
                 let obj = reconstruct_inode key bin in
@@ -427,112 +438,144 @@ end = struct
           | (`Ok (`Blob _ | `Commit _) as v) | (`Error_p1 _ as v) -> v
         in
 
-        if idx mod 2_000_000 = 0 then
-          Fmt.epr
-            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
-            idx (Int63.to_int64 off)
-            (float_of_int idx /. float_of_int entry_count *. 100.)
-            kind pp_key key len mem_usage;
-        add_to_assoc_at_key per_hash key off { len; kind; reconstruction };
+        add_to_assoc_at_key per_hash key off { len; kind; details };
         progress Int63.one;
         idx + 1
       in
 
       let (_ : int) = Offsetmap.fold aux pass1.Pass1.per_offset 0 in
       {
+        entry_count = pass1.Pass1.entry_count;
         per_hash;
         per_offset = pass1.Pass1.per_offset;
         extra_errors = pass1.Pass1.extra_errors;
       }
   end
 
+  (** Build a graph of all this.
+
+      Commits are not linked together. *)
   module Pass3 = struct
+    type value =
+      [ `Blob of Contents.t | `Node of Inode.Val.t | `Commit of Commit_value.t ]
+
+    type entry = {
+      len : length;
+      kind : kind;
+      details :
+        [ `Error_p1 of string
+        | `Error_p2 of Inode_internal.Raw.t * string
+        | `Error_p3 of value * string
+        | `Ok of value ];
+    }
+
+    type t = {
+      entry_count : int;
+      graph : Hashgraph.t;
+      commits_per_date : Hash.t Datemap.t;
+      per_hash : (hash, (offset, entry) assoc) Hashtbl.t;
+    }
+
     let run ~progress pass2 =
       let entry_count = Offsetmap.cardinal pass2.Pass2.per_offset in
-      let g = Hashgraph.create ~size:entry_count () in
-
-      (* let hash_has_multiple_occurences k =
-       *   let assoc = Hashtbl.find pass2.Pass2.per_hash k in
-       *   List.length assoc > 1
-       * in *)
+      let graph = Hashgraph.create ~size:entry_count () in
+      let commits_per_date = ref Datemap.empty in
+      let per_hash = Hashtbl.create entry_count in
       let aux off key idx =
         let assoc = Hashtbl.find pass2.Pass2.per_hash key in
         let multiple_hash_occurences = List.length assoc > 1 in
-        let Pass2.{ len; kind; reconstruction } = List.assoc off assoc in
-
-        let truc =
-          if multiple_hash_occurences then
-            `Error_p3
-              (Fmt.str
-                 "Could not link hash (%a) because it has several occurences."
-                 pp_key key)
-          else
-            let errors = ref [] in
-            let link_to_pred key' =
-              (* if hash_has_multiple_occurences key' then *)
-              (* errors := [ `Error ] :: !errors *)
-              (* else *)
-              if Hashtbl.mem pass2.Pass2.per_hash key' then
-                Hashgraph.add_edge g (key, `Inner) (key', `Outer)
-              else
-                let e = Fmt.str "Unknown children hash %a" pp_key key' in
-                errors := [ e ] :: !errors
-            in
-            Hashgraph.add_edge g (key, `Outer) (key, `Inner);
-            match reconstruction with
-            | (`Error_p1 _ | `Error_p2 _) as x -> x
-            | `Ok (`Blob _) as x -> x
-            | `Ok (`Commit c) as x ->
-                link_to_pred (Commit.node c);
-                List.iter link_to_pred (Commit.parents c);
-                x
-            | `Ok (`Node (n, _)) as x ->
-                List.iter
-                  (function
-                    | `Contents h | `Inode h | `Node h -> link_to_pred h)
-                  (Inode.Val.pred n);
-                x
-        in
-
+        let Pass2.{ len; kind; details } = List.assoc off assoc in
         if idx mod 2_000_000 = 0 then
           Fmt.epr
             "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
             idx (Int63.to_int64 off)
             (float_of_int idx /. float_of_int entry_count *. 100.)
             kind pp_key key len mem_usage;
+
+        let details =
+          match details with
+          | (`Error_p1 _ | `Error_p2 _) as x -> x
+          | `Ok obj -> (
+              let obj_out =
+                match obj with
+                | (`Commit _ | `Blob _) as x -> x
+                | `Node (x, _) -> `Node x
+              in
+              let error_p3 e = `Error_p3 (obj_out, e) in
+              if multiple_hash_occurences then
+                Fmt.str
+                  "Could not link hash (%a) because it has several occurences"
+                  pp_key key
+                |> error_p3
+              else
+                let errors = ref [] in
+                let ok_or_errors () =
+                  match !errors with
+                  | [] -> `Ok obj_out
+                  | l -> String.concat "\n" l |> error_p3
+                in
+                let link_to_pred key' =
+                  if Hashtbl.mem pass2.Pass2.per_hash key' then
+                    Hashgraph.add_edge graph (key, `Inner) (key', `Outer)
+                  else
+                    let e = Fmt.str "Unknown children hash %a" pp_key key' in
+                    errors := e :: !errors
+                in
+
+                match obj with
+                | `Blob _ as x ->
+                    Hashgraph.add_edge graph (key, `Outer) (key, `Inner);
+                    ok_or_errors ()
+                | `Commit c as x ->
+                    link_to_pred (Commit.node c);
+                    let date = Commit.info c |> Info.date in
+                    commits_per_date := Datemap.add date key !commits_per_date;
+                    ok_or_errors ()
+                | `Node (n, indirect_children) as x ->
+                    Hashgraph.add_edge graph (key, `Outer) (key, `Inner);
+                    let children =
+                      Inode.Val.pred n
+                      |> List.map (function
+                             | `Contents h | `Inode h | `Node h -> h)
+                    in
+                    List.iter link_to_pred children;
+                    let direct_children =
+                      List.filter
+                        (fun k -> not (List.mem_assoc k indirect_children))
+                        children
+                    in
+                    List.iter
+                      (fun (k, o) ->
+                        if o >= off then
+                          let e =
+                            Fmt.str "Children %a with higher offset %a (+%a)"
+                              pp_key k (Repr.pp Int63.t) o (Repr.pp Int63.t)
+                              Int63.(sub o off)
+                          in
+                          errors := e :: !errors)
+                      indirect_children;
+                    List.iter
+                      (fun k ->
+                        let e = Fmt.str "Children by hash %a" pp_key k in
+                        errors := e :: !errors)
+                      direct_children;
+                    ok_or_errors ())
+        in
+        add_to_assoc_at_key per_hash key off { len; kind; details };
+
         progress Int63.one;
         idx + 1
       in
 
       let (_ : int) = Offsetmap.fold aux pass2.Pass2.per_offset 0 in
-      ()
+      let commits_per_date = !commits_per_date in
+      {
+        entry_count = pass2.Pass2.entry_count;
+        graph;
+        commits_per_date;
+        per_hash;
+      }
   end
-
-  (* type pred = [ `Hash of Hash.t | `Offset of offset ] *)
-
-  (* type reconstruction = {
-   *   preds :
-   *     [ `Blob of offset * [ `Offset | `Hash ]
-   *     | `Node of offset * [ `Offset | `Hash ]
-   *     | `Commit of offset ]
-   *     list;
-   * } *)
-  (* graph : Offsetgraph.t; *)
-
-  (* (\** Identify duplicate hashes *\)
-   * module Pass2 = struct
-   *   let run ~progress pass1 =
-   *     let tbl = Hashtbl.create 0 in
-   *     Hashtbl.iter
-   *       (fun key ->
-   *         progress Int63.one;
-   *         function
-   *         | [ _ ] -> ()
-   *         | [] -> assert false
-   *         | l -> Hashtbl.add tbl key (List.length l))
-   *       pass1.Pass1.per_hash;
-   *     tbl
-   * end *)
 
   let run config =
     if Conf.readonly config then raise S.RO_not_allowed;
@@ -548,50 +591,67 @@ end = struct
     in
     Printf.eprintf "opening dict\n%!";
     let dict = Dict.v ~fresh:false ~readonly:true root in
+    let byte_count = IO.offset pack in
 
-    Printf.eprintf "Pass0 - go\n%!";
-    let total = IO.offset pack in
-    let bar, progress =
-      Utils.Progress.counter ~total ~sampling_interval:10_000
-        ~message:"Brute force integrity check, pass0" ~pp_count:Utils.pp_bytes
-        ()
+    let pass0 () =
+      Printf.eprintf "Pass0 - go\n%!";
+      let bar, progress =
+        Utils.Progress.counter ~total:byte_count ~sampling_interval:10_000
+          ~message:"Brute force integrity check, pass0" ~pp_count:Utils.pp_bytes
+          ()
+      in
+      let pass0 = Pass0.run ~progress ~total:byte_count pack in
+      Utils.Progress.finalise bar;
+      Printf.eprintf "Pass0 - done\n%!";
+      pass0
     in
-    let pass0 = Pass0.run ~progress ~total pack in
-    Utils.Progress.finalise bar;
-    Printf.eprintf "Pass0 - done\n%!";
 
-    Printf.eprintf "Pass1 - go\n%!";
-    let bar, progress =
-      Utils.Progress.counter
-        ~total:(Offsetmap.cardinal pass0.Pass0.per_offset |> Int63.of_int)
-        ~sampling_interval:10_000 ~message:"Brute force integrity check, pass1"
-        ()
+    let pass1 () =
+      let pass0 = pass0 () in
+      Gc.compact ();
+      let entry_count = Int63.of_int pass0.Pass0.entry_count in
+      Printf.eprintf "Pass1 - go\n%!";
+      let bar, progress =
+        Utils.Progress.counter ~total:entry_count ~sampling_interval:10_000
+          ~message:"Brute force integrity check, pass1" ()
+      in
+      let pass1 = Pass1.run ~progress ~pack_size:byte_count pack dict pass0 in
+      Utils.Progress.finalise bar;
+      Printf.eprintf "Pass1 - done\n%!";
+      pass1
     in
-    let pass1 = Pass1.run ~progress ~pack_size:total pack dict pass0 in
-    Utils.Progress.finalise bar;
-    Printf.eprintf "Pass1 - done\n%!";
 
-    Printf.eprintf "Pass2 - go\n%!";
-    let bar, progress =
-      Utils.Progress.counter
-        ~total:(Offsetmap.cardinal pass0.Pass0.per_offset |> Int63.of_int)
-        ~sampling_interval:10_000 ~message:"Brute force integrity check, pass2"
-        ()
+    let pass2 () =
+      let pass1 = pass1 () in
+      Gc.compact ();
+      let entry_count = Int63.of_int pass1.Pass1.entry_count in
+      Printf.eprintf "Pass2 - go\n%!";
+      let bar, progress =
+        Utils.Progress.counter ~total:entry_count ~sampling_interval:10_000
+          ~message:"Brute force integrity check, pass2" ()
+      in
+      let pass2 = Pass2.run ~progress pass1 in
+      Utils.Progress.finalise bar;
+      Printf.eprintf "Pass2 - done\n%!";
+      pass2
     in
-    let pass2 = Pass2.run ~progress pass1 in
-    Utils.Progress.finalise bar;
-    Printf.eprintf "Pass2 - done\n%!";
 
-    Printf.eprintf "Pass3 - go\n%!";
-    let bar, progress =
-      Utils.Progress.counter
-        ~total:(Offsetmap.cardinal pass0.Pass0.per_offset |> Int63.of_int)
-        ~sampling_interval:10_000 ~message:"Brute force integrity check, pass3"
-        ()
+    let pass3 () =
+      let pass2 = pass2 () in
+      Gc.compact ();
+      Printf.eprintf "Pass3 - go\n%!";
+      let entry_count = Int63.of_int pass2.Pass2.entry_count in
+      let bar, progress =
+        Utils.Progress.counter ~total:entry_count ~sampling_interval:10_000
+          ~message:"Brute force integrity check, pass3" ()
+      in
+      let pass3 = Pass3.run ~progress pass2 in
+      Utils.Progress.finalise bar;
+      Printf.eprintf "Pass3 - done\n%!";
+      pass3
     in
-    let _ = Pass3.run ~progress pass2 in
-    Utils.Progress.finalise bar;
-    Printf.eprintf "Pass3 - done\n%!";
+
+    let _ = pass3 () in
 
     ignore index;
     IO.close pack;
