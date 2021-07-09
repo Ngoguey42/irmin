@@ -235,7 +235,8 @@ end = struct
     type entry = {
       len : length;
       kind : kind;
-      details : [ `Error_p1 of string | `Ok of value ];
+      reconstruction : [ `None | `Some of value ];
+      errors : string list;
     }
 
     type content = {
@@ -324,18 +325,19 @@ end = struct
           in
           (bin, !indirect_children)
         in
-        let details =
+        let reconstruction, errors =
           try
             match kind with
-            | 'C' -> `Ok (`Commit (reconstruct_commit ()))
-            | 'B' -> `Ok (`Blob (reconstruct_contents ()))
-            | 'I' | 'N' -> `Ok (`Node (reconstruct_node ()))
+            | 'C' -> (`Some (`Commit (reconstruct_commit ())), [])
+            | 'B' -> (`Some (`Blob (reconstruct_contents ())), [])
+            | 'I' | 'N' -> (`Some (`Node (reconstruct_node ())), [])
             | _ -> assert false
           with
           | Assert_failure _ as e -> raise e
-          | e -> `Error_p1 (Printexc.to_string e)
+          | e -> (`None, [ Printexc.to_string e ])
         in
-        add_to_assoc_at_key per_hash key off { len; kind; details };
+        add_to_assoc_at_key per_hash key off
+          { len; kind; reconstruction; errors };
         progress Int63.one;
         idx + 1
       in
@@ -359,10 +361,9 @@ end = struct
     type entry = {
       len : length;
       kind : kind;
-      details :
-        [ `Error_p1 of string
-        | `Error_p2 of Inode_internal.Raw.t * string
-        | `Ok of value ];
+      reconstruction :
+        [ `None | `Some of value | `Bin_only of Inode_internal.Raw.t ];
+      errors : string list;
     }
 
     type content = {
@@ -374,18 +375,20 @@ end = struct
 
     let run ~progress pass1 =
       let entry_count = Offsetmap.cardinal pass1.Pass1.per_offset in
-      (* let obj_of_hash = Hashtbl.create entry_count in *)
       let per_hash = Hashtbl.create entry_count in
 
       let get_raw_inode key =
         match Hashtbl.find_opt pass1.Pass1.per_hash key with
-        | Some Pass1.[ (_, { details = `Ok (`Node (bin, _)); _ }) ] -> Some bin
-        | Some Pass1.[ (_, { details = `Error_p1 _; _ }) ] ->
+        | Some Pass1.[ (_, { reconstruction = `Some (`Node (bin, _)); _ }) ] ->
+            Some bin
+        | Some Pass1.[ (_, { reconstruction = `None; _ }) ] ->
             Fmt.failwith
               "Abort stable inode rehash because a children failed at Pass1  \
                (%a)"
               (Repr.pp Hash.t) key
-        | Some Pass1.[ (_, { details = `Ok (`Commit _ | `Blob _); _ }) ] ->
+        | Some
+            Pass1.[ (_, { reconstruction = `Some (`Commit _ | `Blob _); _ }) ]
+          ->
             Fmt.failwith
               "Abort stable inode rehash because a children is a commit or a \
                blob (%a)"
@@ -394,7 +397,8 @@ end = struct
             match
               List.find_map
                 (function
-                  | _, Pass1.{ details = `Ok (`Node (bin, _)); _ } -> Some bin
+                  | _, Pass1.{ reconstruction = `Some (`Node (bin, _)); _ } ->
+                      Some bin
                   | _ -> None)
                 l
             with
@@ -422,7 +426,7 @@ end = struct
       in
 
       let aux off key idx =
-        let Pass1.{ len; kind; details } =
+        let Pass1.{ len; kind; reconstruction; errors } =
           Hashtbl.find pass1.Pass1.per_hash key |> List.assoc off
         in
         if idx mod 2_000_000 = 0 then
@@ -431,21 +435,20 @@ end = struct
             idx (Int63.to_int64 off)
             (float_of_int idx /. float_of_int entry_count *. 100.)
             kind pp_key key len mem_usage;
-        let details =
-          match details with
-          | `Ok (`Node (bin, indirect_children)) -> (
+        let reconstruction, new_errors =
+          match reconstruction with
+          | `Some (`Node (bin, indirect_children)) -> (
               try
                 let obj = reconstruct_inode key bin in
-                `Ok (`Node (obj, indirect_children))
+                (`Some (`Node (obj, indirect_children)), [])
               with
               | Assert_failure _ as e -> raise e
-              | e ->
-                  (* `Error_p2 (bin, Printexc.to_string e) *)
-                  raise e)
-          | (`Ok (`Blob _ | `Commit _) as v) | (`Error_p1 _ as v) -> v
+              | e -> (`Bin_only bin, [ Printexc.to_string e ]))
+          | (`Some (`Blob _ | `Commit _) as v) | (`None as v) -> (v, [])
         in
-
-        add_to_assoc_at_key per_hash key off { len; kind; details };
+        let errors = errors @ new_errors in
+        add_to_assoc_at_key per_hash key off
+          { len; kind; reconstruction; errors };
         progress Int63.one;
         idx + 1
       in
@@ -469,12 +472,9 @@ end = struct
     type entry = {
       len : length;
       kind : kind;
-      details :
-        [ `Error_p1 of string
-        | `Error_p2 of Inode_internal.Raw.t * string
-        | `Error_p3 of value * string
-        | `Ok of value ];
-      warnings : string list;
+      reconstruction :
+        [ `None | `Some of value | `Bin_only of Inode_internal.Raw.t ];
+      errors : string list;
     }
 
     type t = {
@@ -494,7 +494,9 @@ end = struct
       let aux off key idx =
         let assoc = Hashtbl.find pass2.Pass2.per_hash key in
         let multiple_hash_occurences = List.length assoc > 1 in
-        let Pass2.{ len; kind; details } = List.assoc off assoc in
+        let Pass2.{ len; kind; reconstruction; errors } =
+          List.assoc off assoc
+        in
         if idx mod 2_000_000 = 0 then
           Fmt.epr
             "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
@@ -502,10 +504,10 @@ end = struct
             (float_of_int idx /. float_of_int entry_count *. 100.)
             kind pp_key key len mem_usage;
 
-        let details, warnings =
-          match details with
-          | (`Error_p1 _ | `Error_p2 _) as x -> (x, [])
-          | `Ok obj ->
+        let reconstruction, new_errors =
+          match reconstruction with
+          | `None -> (`None, [])
+          | `Some obj ->
               let obj_out =
                 match obj with
                 | (`Commit _ | `Blob _) as x -> x
@@ -517,15 +519,15 @@ end = struct
                     "Could not link hash (%a) because it has several occurences"
                     pp_key key
                 in
-                (`Error_p3 (obj_out, e), [])
+                (`Some obj_out, [ e ])
               else
-                let warnings = ref [] in
+                let errs = ref [] in
                 let link_to_pred key' =
                   if Hashtbl.mem pass2.Pass2.per_hash key' then
                     Hashgraph.add_edge graph key key'
                   else
                     let e = Fmt.str "Unknown children hash %a" pp_key key' in
-                    warnings := e :: !warnings
+                    errs := e :: !errs
                 in
 
                 let deal_with_blob () = Hashgraph.add_vertex graph key in
@@ -533,6 +535,7 @@ end = struct
                   Hashgraph.add_vertex graph key;
                   link_to_pred (Commit.node c);
                   let date = Commit.info c |> Info.date in
+                  List.iter link_to_pred (Commit.parents c);
                   commits_per_date := Datemap.add date key !commits_per_date
                 in
                 let deal_with_node (n, indirect_children) =
@@ -557,7 +560,7 @@ end = struct
                             pp_key k (Repr.pp Int63.t) o (Repr.pp Int63.t)
                             Int63.(sub o off)
                         in
-                        warnings := e :: !warnings)
+                        errs := e :: !errs)
                     indirect_children;
                   List.iter
                     (fun k ->
@@ -566,17 +569,19 @@ end = struct
                           "Possesses a children by hash (direct children) %a"
                           pp_key k
                       in
-                      warnings := e :: !warnings)
+                      errs := e :: !errs)
                     direct_children
                 in
                 (match obj with
                 | `Blob _ -> deal_with_blob ()
                 | `Commit c -> deal_with_commit c
                 | `Node x -> deal_with_node x);
-
-                (`Ok obj_out, !warnings)
+                (`Some obj_out, !errs)
         in
-        add_to_assoc_at_key per_hash key off { len; kind; details; warnings };
+        let errors = errors @ new_errors in
+
+        add_to_assoc_at_key per_hash key off
+          { len; kind; reconstruction; errors };
 
         progress Int63.one;
         idx + 1
@@ -602,13 +607,10 @@ end = struct
     type entry = {
       len : length;
       kind : kind;
-      details :
-        [ `Error_p1 of string
-        | `Error_p2 of Inode_internal.Raw.t * string
-        | `Error_p3 of value * string
-        | `Ok of value ];
-      warnings : string list;
+      reconstruction :
+        [ `None | `Some of value | `Bin_only of Inode_internal.Raw.t ];
       latest_commit_successor : hash option;
+      errors : string list;
     }
 
     type t = {
@@ -637,14 +639,19 @@ end = struct
          the objects reachable from a commit. The missing ones are orphan. *)
       let per_hash = Hashtbl.create entry_count in
       let aux off key idx =
-        let Pass3.{ len; kind; details; warnings } =
+        let Pass3.{ len; kind; reconstruction; errors } =
           Hashtbl.find pass3.Pass3.per_hash key |> List.assoc off
         in
         let latest_commit_successor =
           Hashtbl.find_opt newest_commit_per_hash key
         in
+        let errors =
+          match latest_commit_successor with
+          | Some _ -> errors
+          | None -> "orphan from any commit" :: errors
+        in
         add_to_assoc_at_key per_hash key off
-          { len; kind; details; warnings; latest_commit_successor };
+          { len; kind; reconstruction; latest_commit_successor; errors };
         if idx mod 2 = 0 then progress Int63.one;
         idx + 1
       in
@@ -663,20 +670,13 @@ end = struct
       [ `Blob of Contents.t | `Node of Inode.Val.t | `Commit of Commit_value.t ]
     [@@deriving irmin]
 
-    type details =
-      [ `Error_p1 of string
-      | `Error_p2 of Inode_internal.Raw.t * string
-      | `Error_p3 of value * string
-      | `Ok of value ]
-    [@@deriving irmin]
-
     type entry = {
       len : length;
       kind : kind;
-      details : details;
-      warnings : string list;
+      reconstruction :
+        [ `None | `Some of value | `Bin_only of Inode_internal.Raw.t ];
       latest_commit_successor : hash option;
-      index_status : [ `Ok | `Missing | `Errors of string list ];
+      errors : string list;
     }
 
     type t = {
@@ -800,28 +800,25 @@ end = struct
       (* Step 4 - Attach the Index errors to their pack entry *)
       let per_hash = Hashtbl.create entry_count in
       let aux off key idx =
-        let Pass4.{ len; kind; details; warnings; latest_commit_successor } =
+        let Pass4.{ len; kind; reconstruction; latest_commit_successor; errors }
+            =
           Hashtbl.find pass4.Pass4.per_hash key |> List.assoc off
         in
-        let index_errors =
+        let new_errors =
           Hashtbl.find_all invalid_index_keys key
           @ Hashtbl.find_all invalid_index_offs off
           |> List.sort_uniq Stdlib.compare
         in
-        let index_status =
-          match index_errors with
-          | [] -> if Hashtbl.mem remaining_index_keys key then `Ok else `Missing
-          | l -> `Errors l
+        let new_errors =
+          match new_errors with
+          | [] ->
+              if Hashtbl.mem remaining_index_keys key then []
+              else "No trace of this hash/offset in index" :: new_errors
+          | l -> l
         in
+        let errors = errors @ new_errors in
         add_to_assoc_at_key per_hash key off
-          {
-            len;
-            kind;
-            details;
-            warnings;
-            latest_commit_successor;
-            index_status;
-          };
+          { len; kind; reconstruction; latest_commit_successor; errors };
         idx + 1
       in
       let (_ : int) = Offsetmap.fold aux pass4.Pass4.per_offset 0 in
@@ -858,52 +855,37 @@ end = struct
         extra_errors = pass4.Pass4.extra_errors @ new_extra_errors;
       }
 
-    let is_entry_errorless = function
-      | {
-          details = `Ok _;
-          warnings = [];
-          latest_commit_successor = Some _;
-          index_status = `Ok;
-          _;
-        } ->
-          true
-      | _ -> false
+    let is_entry_errorless = function { errors = []; _ } -> true | _ -> false
 
     let pp_latest_commit_successor ppf (per_hash, x) =
       match x with
-      | None -> Format.fprintf ppf "orphan from any commit"
+      | None -> Format.fprintf ppf "none"
       | Some key -> (
           match Hashtbl.find per_hash key with
-          | (_, entry) :: _ -> (
-              match entry.details with
-              | `Error_p3 (`Commit v, _) | `Ok (`Commit v) ->
-                  (Repr.pp Commit_value.t) ppf v
-              | _ -> Format.fprintf ppf "<could not retrive commit details>")
-          | _ -> Format.fprintf ppf "<could not retrive commit details>")
+          | [ (off, { reconstruction = `Some (`Commit v) }) ] ->
+              Format.fprintf ppf "hash:%a, off:%#Ld, %a" pp_key key
+                (Int63.to_int64 off) (Repr.pp Commit_value.t) v
+          | _ -> Format.fprintf ppf "<could not retrive commit reconstruction>")
 
-    let pp_index_status ppf = function
-      | `Ok -> Format.fprintf ppf "Ok"
-      | `Missing -> Format.fprintf ppf "No trace of this hash/offset"
-      | `Errors l ->
-          Format.fprintf ppf "errors: - %a"
-            Fmt.(list ~sep:(any "\n          - ") string)
-            l
+    let pp_reconstruction ppf = function
+      | `None -> Format.fprintf ppf "none"
+      | `Some v -> Format.fprintf ppf "%a" (Repr.pp value_t) v
+      | `Bin_only v ->
+          Format.fprintf ppf "(Inode.Bin) %a" (Repr.pp Inode_internal.Raw.t) v
 
     let pp_entry ppf (per_hash, idx, entry_count, off, byte_count, key, entry) =
       Format.fprintf ppf
         "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%)\n\
          \'%c', %a, <%d bytes>\n\
          latest_commit_successor: %a\n\
-         details: %a\n\
-         warnings: - %a\n\
-         index status:%a" idx entry_count (Int63.to_int64 off)
+         reconstruction: %a%a" idx entry_count (Int63.to_int64 off)
         (Int63.to_int64 byte_count)
         (Int63.to_float off /. Int63.to_float byte_count *. 100.)
         entry.kind pp_key key entry.len pp_latest_commit_successor
         (per_hash, entry.latest_commit_successor)
-        (Repr.pp details_t) entry.details
-        Fmt.(list ~sep:(any "\n          - ") string)
-        entry.warnings pp_index_status entry.index_status
+        pp_reconstruction entry.reconstruction
+        Fmt.(list string)
+        (List.map (Printf.sprintf "\nError: %s") entry.errors)
 
     let spacer =
       "****************************************************************************************************"
@@ -936,7 +918,6 @@ end = struct
 
   let run config =
     if Conf.readonly config then raise S.RO_not_allowed;
-    (* let run_duration = Mtime_clock.counter () in *)
     let root = Conf.root config in
     let log_size = Conf.index_log_size config in
     let pack_file = Filename.concat root "store.pack" in
@@ -1018,5 +999,7 @@ end = struct
     let pass5 = pass5 () in
     ignore index;
     IO.close pack;
-    fun ppf -> Format.fprintf ppf "%a\n%!" Pass5.pp pass5
+    fun ppf ->
+      Format.fprintf ppf "%a\n%!" Pass5.pp pass5;
+      ()
 end
