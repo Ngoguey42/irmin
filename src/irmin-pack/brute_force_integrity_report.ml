@@ -687,6 +687,8 @@ end = struct
       extra_errors : string list;
     }
 
+    (* TODO: PRINT COMMIT OFFSETS!!! *)
+    (* TODO: Duplicate hash causes orphan from commit, which is not really true *)
     let run ~progress byte_count pass4 index =
       let entry_count = pass4.Pass4.entry_count in
       let remaining_index_keys = Hashtbl.create entry_count in
