@@ -426,8 +426,10 @@ end = struct
       in
 
       let aux off key idx =
+        let assoc = Hashtbl.find pass1.Pass1.per_hash key in
+        let multiple_hash_occurences = List.length assoc > 1 in
         let Pass1.{ len; kind; reconstruction; errors } =
-          Hashtbl.find pass1.Pass1.per_hash key |> List.assoc off
+          List.assoc off assoc
         in
         if idx mod 2_000_000 = 0 then
           Fmt.epr
@@ -446,7 +448,17 @@ end = struct
               | e -> (`Bin_only bin, [ Printexc.to_string e ]))
           | (`Some (`Blob _ | `Commit _) as v) | (`None as v) -> (v, [])
         in
-        let errors = errors @ new_errors in
+        let errors =
+          errors
+          @ new_errors
+          @
+          if multiple_hash_occurences then
+            [
+              Fmt.str "Hash (%a) has %d occurences in the pack file" pp_key key
+                (List.length assoc);
+            ]
+          else []
+        in
         add_to_assoc_at_key per_hash key off
           { len; kind; reconstruction; errors };
         progress Int63.one;
@@ -493,7 +505,6 @@ end = struct
       let per_hash = Hashtbl.create entry_count in
       let aux off key idx =
         let assoc = Hashtbl.find pass2.Pass2.per_hash key in
-        let multiple_hash_occurences = List.length assoc > 1 in
         let Pass2.{ len; kind; reconstruction; errors } =
           List.assoc off assoc
         in
@@ -513,70 +524,61 @@ end = struct
                 | (`Commit _ | `Blob _) as x -> x
                 | `Node (x, _) -> `Node x
               in
-              if multiple_hash_occurences then
-                let e =
-                  Fmt.str
-                    "Could not link hash (%a) because it has several occurences"
-                    pp_key key
-                in
-                (`Some obj_out, [ e ])
-              else
-                let errs = ref [] in
-                let link_to_pred key' =
-                  if Hashtbl.mem pass2.Pass2.per_hash key' then
-                    Hashgraph.add_edge graph key key'
-                  else
-                    let e = Fmt.str "Unknown children hash %a" pp_key key' in
-                    errs := e :: !errs
-                in
+              let errs = ref [] in
+              let link_to_pred key' =
+                if Hashtbl.mem pass2.Pass2.per_hash key' then
+                  Hashgraph.add_edge graph key key'
+                else
+                  let e = Fmt.str "Unknown children hash %a" pp_key key' in
+                  errs := e :: !errs
+              in
 
-                let deal_with_blob () = Hashgraph.add_vertex graph key in
-                let deal_with_commit c =
-                  Hashgraph.add_vertex graph key;
-                  link_to_pred (Commit.node c);
-                  let date = Commit.info c |> Info.date in
-                  List.iter link_to_pred (Commit.parents c);
-                  commits_per_date := Datemap.add date key !commits_per_date
+              let deal_with_blob () = Hashgraph.add_vertex graph key in
+              let deal_with_commit c =
+                Hashgraph.add_vertex graph key;
+                link_to_pred (Commit.node c);
+                let date = Commit.info c |> Info.date in
+                List.iter link_to_pred (Commit.parents c);
+                commits_per_date := Datemap.add date key !commits_per_date
+              in
+              let deal_with_node (n, indirect_children) =
+                Hashgraph.add_vertex graph key;
+                let children =
+                  Inode.Val.pred n
+                  |> List.map (function `Contents h | `Inode h | `Node h -> h)
                 in
-                let deal_with_node (n, indirect_children) =
-                  Hashgraph.add_vertex graph key;
-                  let children =
-                    Inode.Val.pred n
-                    |> List.map (function `Contents h | `Inode h | `Node h -> h)
-                  in
-                  List.iter link_to_pred children;
-                  let direct_children =
-                    List.filter
-                      (fun k -> not (List.mem_assoc k indirect_children))
-                      children
-                  in
-                  List.iter
-                    (fun (k, o) ->
-                      if o >= off then
-                        let e =
-                          Fmt.str
-                            "Possesses a children %a with higher offset %a \
-                             (+%a)"
-                            pp_key k (Repr.pp Int63.t) o (Repr.pp Int63.t)
-                            Int63.(sub o off)
-                        in
-                        errs := e :: !errs)
-                    indirect_children;
-                  List.iter
-                    (fun k ->
+                List.iter link_to_pred children;
+                let direct_children =
+                  List.filter
+                    (fun k -> not (List.mem_assoc k indirect_children))
+                    children
+                in
+                List.iter
+                  (fun (k, o) ->
+                    if o >= off then
                       let e =
                         Fmt.str
-                          "Possesses a children by hash (direct children) %a"
-                          pp_key k
+                          "Possesses a children %a with higher offset %a (+%a)"
+                          pp_key k (Repr.pp Int63.t) o (Repr.pp Int63.t)
+                          Int63.(sub o off)
                       in
                       errs := e :: !errs)
-                    direct_children
-                in
-                (match obj with
-                | `Blob _ -> deal_with_blob ()
-                | `Commit c -> deal_with_commit c
-                | `Node x -> deal_with_node x);
-                (`Some obj_out, !errs)
+                  indirect_children;
+                List.iter
+                  (fun k ->
+                    let e =
+                      Fmt.str
+                        "Possesses a children by hash (direct children) %a"
+                        pp_key k
+                    in
+                    errs := e :: !errs)
+                  direct_children
+              in
+              (match obj with
+              | `Blob _ -> deal_with_blob ()
+              | `Commit c -> deal_with_commit c
+              | `Node x -> deal_with_node x);
+              (`Some obj_out, !errs)
         in
         let errors = errors @ new_errors in
 
@@ -687,8 +689,6 @@ end = struct
       extra_errors : string list;
     }
 
-    (* TODO: PRINT COMMIT OFFSETS!!! *)
-    (* TODO: Duplicate hash causes orphan from commit, which is not really true *)
     let run ~progress byte_count pass4 index =
       let entry_count = pass4.Pass4.entry_count in
       let remaining_index_keys = Hashtbl.create entry_count in
@@ -858,6 +858,7 @@ end = struct
       }
 
     let is_entry_errorless = function { errors = []; _ } -> true | _ -> false
+    let is_entry_commit = function { kind = 'C'; _ } -> true | _ -> false
 
     let pp_latest_commit_successor ppf (per_hash, x) =
       match x with
@@ -877,8 +878,8 @@ end = struct
 
     let pp_entry ppf (per_hash, idx, entry_count, off, byte_count, key, entry) =
       Format.fprintf ppf
-        "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%)\n\
-         \'%c', %a, <%d bytes>\n\
+        "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%) \
+         '%c', %a, <%d bytes>\n\
          latest_commit_successor: %a\n\
          reconstruction: %a%a" idx entry_count (Int63.to_int64 off)
         (Int63.to_int64 byte_count)
@@ -887,7 +888,23 @@ end = struct
         (per_hash, entry.latest_commit_successor)
         pp_reconstruction entry.reconstruction
         Fmt.(list string)
-        (List.map (Printf.sprintf "\nError: %s") entry.errors)
+        (List.map (Printf.sprintf "\nERROR: %s") entry.errors)
+
+    let pp_errorless_commit ppf (idx, entry_count, off, byte_count, key, entry)
+        =
+      Format.fprintf ppf
+        "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%) \
+         '%c', %a, <%d bytes>\n\
+         reconstruction: %a" idx entry_count (Int63.to_int64 off)
+        (Int63.to_int64 byte_count)
+        (Int63.to_float off /. Int63.to_float byte_count *. 100.)
+        entry.kind pp_key key entry.len
+        (* pp_latest_commit_successor *)
+        (* (per_hash, entry.latest_commit_successor) *)
+        pp_reconstruction entry.reconstruction
+
+    (* Fmt.(list string) *)
+    (* (List.map (Printf.sprintf "\nError: %s") entry.errors) *)
 
     let spacer =
       "****************************************************************************************************"
@@ -898,9 +915,15 @@ end = struct
       Offsetmap.iter
         (fun off key ->
           let entry = Hashtbl.find per_hash key |> List.assoc off in
-          if not @@ is_entry_errorless entry then
+          let has_errors = not @@ is_entry_errorless entry in
+          let is_commit = is_entry_commit entry in
+          if has_errors then
             Format.fprintf ppf "%s\n%a\n%s\n\n%!" spacer pp_entry
               (per_hash, !idx, entry_count, off, byte_count, key, entry)
+              spacer
+          else if is_commit then
+            Format.fprintf ppf "%s\n%a\n%s\n\n%!" spacer pp_errorless_commit
+              (!idx, entry_count, off, byte_count, key, entry)
               spacer;
           incr idx)
         per_offset;
