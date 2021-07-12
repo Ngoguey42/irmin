@@ -929,7 +929,7 @@ end = struct
         pp_commit_successor
         (per_hash, entry.newest_commit_successor)
         pp_reconstruction entry.reconstruction
-        Fmt.(list string)
+        Fmt.(list ~sep:(any "") string)
         (List.map (Printf.sprintf "\nERROR: %s") entry.errors)
 
     let pp_errorless_commit ppf (idx, entry_count, off, byte_count, key, entry)
