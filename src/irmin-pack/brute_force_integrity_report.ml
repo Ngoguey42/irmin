@@ -529,7 +529,9 @@ end = struct
                 if Hashtbl.mem pass2.Pass2.per_hash key' then
                   Hashgraph.add_edge graph key key'
                 else
-                  let e = Fmt.str "Unknown children hash %a" pp_key key' in
+                  let e =
+                    Fmt.str "Children hash %a not in pack file" pp_key key'
+                  in
                   errs := e :: !errs
               in
 
@@ -611,7 +613,8 @@ end = struct
       kind : kind;
       reconstruction :
         [ `None | `Some of value | `Bin_only of Inode_internal.Raw.t ];
-      latest_commit_successor : hash option;
+      oldest_commit_successor : hash option;
+      newest_commit_successor : hash option;
       errors : string list;
     }
 
@@ -630,12 +633,23 @@ end = struct
       let rec visit ~commit_hash hash =
         if not @@ Hashtbl.mem newest_commit_per_hash hash then (
           Hashtbl.add newest_commit_per_hash hash commit_hash;
-          if Hashtbl.length newest_commit_per_hash mod 2 = 0 then
+          if Hashtbl.length newest_commit_per_hash mod 3 = 0 then
             progress Int63.one;
           Hashgraph.iter_succ (visit ~commit_hash) graph hash)
       in
       let visit_commit (_date, hash) = visit ~commit_hash:hash hash in
       Datemap.to_rev_seq pass3.Pass3.commits_per_date |> Seq.iter visit_commit;
+
+      let oldest_commit_per_hash = Hashtbl.create entry_count in
+      let rec visit ~commit_hash hash =
+        if not @@ Hashtbl.mem oldest_commit_per_hash hash then (
+          Hashtbl.add oldest_commit_per_hash hash commit_hash;
+          if Hashtbl.length oldest_commit_per_hash mod 3 = 0 then
+            progress Int63.one;
+          Hashgraph.iter_succ (visit ~commit_hash) graph hash)
+      in
+      let visit_commit (_date, hash) = visit ~commit_hash:hash hash in
+      Datemap.to_seq pass3.Pass3.commits_per_date |> Seq.iter visit_commit;
 
       (* The [newest_commit_per_hash] table now contains all the hashes of all
          the objects reachable from a commit. The missing ones are orphan. *)
@@ -644,17 +658,27 @@ end = struct
         let Pass3.{ len; kind; reconstruction; errors } =
           Hashtbl.find pass3.Pass3.per_hash key |> List.assoc off
         in
-        let latest_commit_successor =
+        let newest_commit_successor =
           Hashtbl.find_opt newest_commit_per_hash key
         in
+        let oldest_commit_successor =
+          Hashtbl.find_opt oldest_commit_per_hash key
+        in
         let errors =
-          match latest_commit_successor with
+          match newest_commit_successor with
           | Some _ -> errors
           | None -> "orphan from any commit" :: errors
         in
         add_to_assoc_at_key per_hash key off
-          { len; kind; reconstruction; latest_commit_successor; errors };
-        if idx mod 2 = 0 then progress Int63.one;
+          {
+            len;
+            kind;
+            reconstruction;
+            oldest_commit_successor;
+            newest_commit_successor;
+            errors;
+          };
+        if idx mod 3 = 0 then progress Int63.one;
         idx + 1
       in
       let (_ : int) = Offsetmap.fold aux pass3.Pass3.per_offset 0 in
@@ -677,7 +701,8 @@ end = struct
       kind : kind;
       reconstruction :
         [ `None | `Some of value | `Bin_only of Inode_internal.Raw.t ];
-      latest_commit_successor : hash option;
+      oldest_commit_successor : hash option;
+      newest_commit_successor : hash option;
       errors : string list;
     }
 
@@ -802,8 +827,15 @@ end = struct
       (* Step 4 - Attach the Index errors to their pack entry *)
       let per_hash = Hashtbl.create entry_count in
       let aux off key idx =
-        let Pass4.{ len; kind; reconstruction; latest_commit_successor; errors }
-            =
+        let Pass4.
+              {
+                len;
+                kind;
+                reconstruction;
+                oldest_commit_successor;
+                newest_commit_successor;
+                errors;
+              } =
           Hashtbl.find pass4.Pass4.per_hash key |> List.assoc off
         in
         let new_errors =
@@ -820,7 +852,14 @@ end = struct
         in
         let errors = errors @ new_errors in
         add_to_assoc_at_key per_hash key off
-          { len; kind; reconstruction; latest_commit_successor; errors };
+          {
+            len;
+            kind;
+            reconstruction;
+            oldest_commit_successor;
+            newest_commit_successor;
+            errors;
+          };
         idx + 1
       in
       let (_ : int) = Offsetmap.fold aux pass4.Pass4.per_offset 0 in
@@ -860,7 +899,7 @@ end = struct
     let is_entry_errorless = function { errors = []; _ } -> true | _ -> false
     let is_entry_commit = function { kind = 'C'; _ } -> true | _ -> false
 
-    let pp_latest_commit_successor ppf (per_hash, x) =
+    let pp_commit_successor ppf (per_hash, x) =
       match x with
       | None -> Format.fprintf ppf "none"
       | Some key -> (
@@ -880,12 +919,15 @@ end = struct
       Format.fprintf ppf
         "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%) \
          '%c', %a, <%d bytes>\n\
-         latest_commit_successor: %a\n\
+         oldest_commit_successor: %a\n\
+         newest_commit_successor: %a\n\
          reconstruction: %a%a" idx entry_count (Int63.to_int64 off)
         (Int63.to_int64 byte_count)
         (Int63.to_float off /. Int63.to_float byte_count *. 100.)
-        entry.kind pp_key key entry.len pp_latest_commit_successor
-        (per_hash, entry.latest_commit_successor)
+        entry.kind pp_key key entry.len pp_commit_successor
+        (per_hash, entry.oldest_commit_successor)
+        pp_commit_successor
+        (per_hash, entry.newest_commit_successor)
         pp_reconstruction entry.reconstruction
         Fmt.(list string)
         (List.map (Printf.sprintf "\nERROR: %s") entry.errors)
@@ -898,13 +940,7 @@ end = struct
          reconstruction: %a" idx entry_count (Int63.to_int64 off)
         (Int63.to_int64 byte_count)
         (Int63.to_float off /. Int63.to_float byte_count *. 100.)
-        entry.kind pp_key key entry.len
-        (* pp_latest_commit_successor *)
-        (* (per_hash, entry.latest_commit_successor) *)
-        pp_reconstruction entry.reconstruction
-
-    (* Fmt.(list string) *)
-    (* (List.map (Printf.sprintf "\nError: %s") entry.errors) *)
+        entry.kind pp_key key entry.len pp_reconstruction entry.reconstruction
 
     let spacer =
       "****************************************************************************************************"
