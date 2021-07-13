@@ -202,7 +202,7 @@ end = struct
         progress (Int63.of_int len);
         if idx mod 2_000_000 = 0 then
           Fmt.epr
-            "\n%#12dth at %#13Ld (%9.6f%%): '%a', %a, <%d bytes> (%t RAM)\n%!"
+            "\nidx:%#12d at %#13Ld (%9.6f%%): '%a', %a, <%d bytes> (%t RAM)\n%!"
             idx (Int63.to_int64 off)
             (Int63.to_float off /. Int63.to_float byte_count *. 100.)
             Pack_value.Kind.pp kind pp_key key len mem_usage;
@@ -285,7 +285,7 @@ end = struct
       let f idx key off len kind buffer buffer_off =
         if idx mod 2_000_000 = 0 then
           Fmt.epr
-            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            "\nidx:%#12d at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
             idx (Int63.to_int64 off)
             (float_of_int idx /. float_of_int entry_count *. 100.)
             kind pp_key key len mem_usage;
@@ -433,7 +433,7 @@ end = struct
         in
         if idx mod 2_000_000 = 0 then
           Fmt.epr
-            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            "\nidx:%#12d at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
             idx (Int63.to_int64 off)
             (float_of_int idx /. float_of_int entry_count *. 100.)
             kind pp_key key len mem_usage;
@@ -510,7 +510,7 @@ end = struct
         in
         if idx mod 2_000_000 = 0 then
           Fmt.epr
-            "\n%#12dth at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
+            "\nidx:%#12d at %#13Ld (%9.6f%%): '%c', %a, <%d bytes> (%t RAM)\n%!"
             idx (Int63.to_int64 off)
             (float_of_int idx /. float_of_int entry_count *. 100.)
             kind pp_key key len mem_usage;
@@ -540,7 +540,15 @@ end = struct
                 Hashgraph.add_vertex graph key;
                 link_to_pred (Commit.node c);
                 let date = Commit.info c |> Info.date in
-                List.iter link_to_pred (Commit.parents c);
+                List.iter
+                  (fun key' ->
+                    if not @@ Hashtbl.mem pass2.Pass2.per_hash key' then
+                      let e =
+                        Fmt.str "Parent commit with hash %a is not in pack file"
+                          pp_key key'
+                      in
+                      errs := e :: !errs)
+                  (Commit.parents c);
                 commits_per_date := Datemap.add date key !commits_per_date
               in
               let deal_with_node (n, indirect_children) =
@@ -917,8 +925,8 @@ end = struct
 
     let pp_entry ppf (per_hash, idx, entry_count, off, byte_count, key, entry) =
       Format.fprintf ppf
-        "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%) \
-         '%c', %a, <%d bytes>\n\
+        "idx:%#12d (total:%#12d), offset:%#13Ld (total:%#13Ld) (%9.6f%%) '%c', \
+         %a, <%d bytes>\n\
          oldest_commit_successor: %a\n\
          newest_commit_successor: %a\n\
          reconstruction: %a%a" idx entry_count (Int63.to_int64 off)
@@ -932,15 +940,16 @@ end = struct
         Fmt.(list ~sep:(any "") string)
         (List.map (Printf.sprintf "\nERROR: %s") entry.errors)
 
-    let pp_errorless_commit ppf (idx, entry_count, off, byte_count, key, entry)
-        =
+    let pp_commit ppf (idx, entry_count, off, byte_count, key, entry) =
       Format.fprintf ppf
         "%#12dth entry (total %#12d) at offset %#13Ld (total %#13Ld, %9.6f%%) \
          '%c', %a, <%d bytes>\n\
-         reconstruction: %a" idx entry_count (Int63.to_int64 off)
+         reconstruction: %a%a" idx entry_count (Int63.to_int64 off)
         (Int63.to_int64 byte_count)
         (Int63.to_float off /. Int63.to_float byte_count *. 100.)
         entry.kind pp_key key entry.len pp_reconstruction entry.reconstruction
+        Fmt.(list ~sep:(any "") string)
+        (List.map (Printf.sprintf "\nERROR: %s") entry.errors)
 
     let spacer =
       "****************************************************************************************************"
@@ -953,13 +962,13 @@ end = struct
           let entry = Hashtbl.find per_hash key |> List.assoc off in
           let has_errors = not @@ is_entry_errorless entry in
           let is_commit = is_entry_commit entry in
-          if has_errors then
+          if is_commit then
+            Format.fprintf ppf "%s\n%a\n%s\n\n%!" spacer pp_commit
+              (!idx, entry_count, off, byte_count, key, entry)
+              spacer
+          else if has_errors then
             Format.fprintf ppf "%s\n%a\n%s\n\n%!" spacer pp_entry
               (per_hash, !idx, entry_count, off, byte_count, key, entry)
-              spacer
-          else if is_commit then
-            Format.fprintf ppf "%s\n%a\n%s\n\n%!" spacer pp_errorless_commit
-              (!idx, entry_count, off, byte_count, key, entry)
               spacer;
           incr idx)
         per_offset;
