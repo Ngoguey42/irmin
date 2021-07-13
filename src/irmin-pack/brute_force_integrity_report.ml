@@ -915,7 +915,7 @@ end = struct
           | [ (off, { reconstruction = `Some (`Commit v); _ }) ] ->
               Format.fprintf ppf "hash:%a, off:%#Ld, %a" pp_key key
                 (Int63.to_int64 off) (Repr.pp Commit_value.t) v
-          | (off, { reconstruction = `Some (`Commit v); _ }) :: _ ->
+          | (_, { reconstruction = `Some (`Commit v); _ }) :: _ ->
               Format.fprintf ppf "hash:%a, off:MULTIPLE, %a" pp_key key
                 (Repr.pp Commit_value.t) v
           | _ -> Format.fprintf ppf "<could not retrive commit reconstruction>")
