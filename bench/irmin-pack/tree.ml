@@ -185,7 +185,7 @@ struct
       (Hash)
 
   let create_repo ~readonly root =
-    let conf = Irmin_pack.config ~readonly ~fresh:true root in
+    let conf = Irmin_pack.config ~readonly ~fresh:false root in
     Store.Repo.v conf
 
   (* let create_repo' config =
@@ -242,7 +242,7 @@ struct
    *   Lwt.return (repo, on_commit, on_end, pp) *)
 
   let create_repo ~readonly root =
-    let conf = Irmin_pack.config ~readonly ~fresh:true root in
+    let conf = Irmin_pack.config ~readonly ~fresh:false root in
     Store.Repo.v conf
 
   include Store

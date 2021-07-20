@@ -118,6 +118,9 @@ module Maker
 
     let unsafe_v ?(fresh = false) ?(readonly = false) ?(lru_size = 10_000)
         ~index root =
+      Printf.eprintf "pack_store.ml unsafe_v fresh=%b %b %d %s\n%!"
+        fresh readonly lru_size root
+      ;
       try
         let t = Hashtbl.find roots (root, readonly) in
         if valid t then (
